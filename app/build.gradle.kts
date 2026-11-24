@@ -12,13 +12,19 @@ android {
         applicationId = "com.app.magiccapsule"
         minSdk = 31
         targetSdk = 35
-        versionCode = 8
-        versionName = "8.0.0"
+        versionCode = 9
+        versionName = "9.0.0"
     }
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            signingConfig = signingConfigs.getByName("debug")
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
         }
     }
 

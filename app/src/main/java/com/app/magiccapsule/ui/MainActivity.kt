@@ -14,23 +14,20 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.layout.windowInsetsBottomHeight
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -46,7 +43,6 @@ import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -80,7 +76,6 @@ fun CapsuleScreen(vm: CapsuleViewModel = viewModel()) {
     val state by vm.uiState.collectAsState()
     val config = state.config
     val context = LocalContext.current
-    val brandColors = remember { (1..12).toList() }
 
     val notifPermLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -116,9 +111,10 @@ fun CapsuleScreen(vm: CapsuleViewModel = viewModel()) {
         }
     }
 
+    // 仅响应固定 systemBars，不监听 WindowInsets.ime；键盘由 adjustPan 硬件平移，避免逐帧重组
     Scaffold(
         contentWindowInsets = WindowInsets.systemBars,
-        topBar = { TopAppBar(title = { Text("灵动胶囊助手 v8") }) }
+        topBar = { TopAppBar(title = { Text("灵动胶囊助手 v9") }) }
     ) { innerPadding ->
         Box(
             modifier = Modifier
@@ -126,143 +122,124 @@ fun CapsuleScreen(vm: CapsuleViewModel = viewModel()) {
                 .padding(innerPadding),
             contentAlignment = Alignment.TopCenter
         ) {
-            LazyColumn(
+            Column(
                 modifier = Modifier
                     .widthIn(max = 600.dp)
-                    .fillMaxWidth(),
-                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                item(key = "env") {
-                    Card(modifier = Modifier.fillMaxWidth()) {
-                        Text(
-                            text = if (state.isFrameworkSupported) {
-                                "✅ 已检测到荣耀 framework-magic 灵动胶囊接口"
-                            } else {
-                                "⚠️ 未检测到 framework-magic（仅普通通知模式）"
+                Card(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = if (state.isFrameworkSupported) {
+                            "✅ 已检测到荣耀 framework-magic 灵动胶囊接口"
+                        } else {
+                            "⚠️ 未检测到 framework-magic（仅普通通知模式）"
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(14.dp)
+                    )
+                }
+
+                OutlinedTextField(
+                    value = config.businessName,
+                    onValueChange = { v -> vm.updateConfig { it.copy(businessName = v) } },
+                    label = { Text("业务短名称（建议 2 字）") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = config.mainText,
+                    onValueChange = { v -> vm.updateConfig { it.copy(mainText = v) } },
+                    label = { Text("主文案") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = config.subText,
+                    onValueChange = { v -> vm.updateConfig { it.copy(subText = v) } },
+                    label = { Text("副文案 / 展开详情") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Text("胶囊模板", style = MaterialTheme.typography.labelLarge)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    CapsuleConfig.ALL_TEMPLATES.forEach { (tplKey, tplLabel) ->
+                        FilterChip(
+                            selected = config.template == tplKey,
+                            onClick = {
+                                vm.updateConfig {
+                                    it.copy(template = tplKey, enableTimer = tplKey.contains("timer"))
+                                }
                             },
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.padding(14.dp)
+                            label = { Text(tplLabel) }
                         )
                     }
                 }
 
-                item(key = "business") {
-                    OutlinedTextField(
-                        value = config.businessName,
-                        onValueChange = { v -> vm.updateConfig { it.copy(businessName = v) } },
-                        label = { Text("业务短名称（建议 2 字）") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-
-                item(key = "main") {
-                    OutlinedTextField(
-                        value = config.mainText,
-                        onValueChange = { v -> vm.updateConfig { it.copy(mainText = v) } },
-                        label = { Text("主文案") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-
-                item(key = "sub") {
-                    OutlinedTextField(
-                        value = config.subText,
-                        onValueChange = { v -> vm.updateConfig { it.copy(subText = v) } },
-                        label = { Text("副文案 / 展开详情") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
-
-                item(key = "tpl_label") {
-                    Text("胶囊模板", style = MaterialTheme.typography.labelLarge)
-                }
-
-                item(key = "tpl_row") {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        items(CapsuleConfig.ALL_TEMPLATES, key = { it.first }) { (tplKey, tplLabel) ->
-                            FilterChip(
-                                selected = config.template == tplKey,
-                                onClick = {
-                                    vm.updateConfig {
-                                        it.copy(template = tplKey, enableTimer = tplKey.contains("timer"))
-                                    }
-                                },
-                                label = { Text(tplLabel) }
-                            )
-                        }
+                Text("品牌主题色（MAGIC_COLOR 1–12）", style = MaterialTheme.typography.labelLarge)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    (1..12).forEach { c ->
+                        FilterChip(
+                            selected = config.brandColor == c,
+                            onClick = { vm.updateConfig { it.copy(brandColor = c) } },
+                            label = { Text("#$c") }
+                        )
                     }
                 }
 
-                item(key = "color_label") {
-                    Text("品牌主题色（MAGIC_COLOR 1–12）", style = MaterialTheme.typography.labelLarge)
+                Button(
+                    onClick = { runWithNotifPermission { vm.startCapsule() } },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("保存并启动灵动胶囊")
                 }
 
-                item(key = "color_row") {
-                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        items(brandColors, key = { it }) { c ->
-                            FilterChip(
-                                selected = config.brandColor == c,
-                                onClick = { vm.updateConfig { it.copy(brandColor = c) } },
-                                label = { Text("#$c") }
-                            )
-                        }
-                    }
-                }
-
-                item(key = "start_btn") {
-                    Button(
-                        onClick = { runWithNotifPermission { vm.startCapsule() } },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("保存并启动灵动胶囊")
-                    }
-                }
-
-                item(key = "action_row") {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = { vm.refreshCapsule() },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("静默刷新")
-                        }
-                        OutlinedButton(
-                            onClick = { vm.stopCapsule() },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("停止服务")
-                        }
-                    }
-                }
-
-                item(key = "battery_btn") {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
                     OutlinedButton(
-                        onClick = { requestIgnoreBatteryOpt() },
-                        modifier = Modifier.fillMaxWidth()
+                        onClick = { vm.refreshCapsule() },
+                        modifier = Modifier.weight(1f)
                     ) {
-                        Text("申请忽略电池优化（防杀后台）")
+                        Text("静默刷新")
+                    }
+                    OutlinedButton(
+                        onClick = { vm.stopCapsule() },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("停止服务")
                     }
                 }
 
-                item(key = "status") {
-                    Text(
-                        text = state.statusMessage,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)
-                    )
+                OutlinedButton(
+                    onClick = { requestIgnoreBatteryOpt() },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("申请忽略电池优化（防杀后台）")
                 }
 
-                item(key = "ime_spacer") {
-                    Spacer(modifier = Modifier.windowInsetsBottomHeight(WindowInsets.ime))
-                }
+                Text(
+                    text = state.statusMessage,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 4.dp, bottom = 16.dp)
+                )
             }
         }
     }

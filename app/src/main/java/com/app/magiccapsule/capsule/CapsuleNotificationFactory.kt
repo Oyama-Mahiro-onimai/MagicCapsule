@@ -6,7 +6,11 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.content.res.ColorStateList
+import android.graphics.Color
+import android.os.Build
 import android.util.TypedValue
+import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.widget.RemoteViews
@@ -39,6 +43,7 @@ object CapsuleNotificationFactory {
         }
     }
 
+    @Suppress("DEPRECATION")
     fun create(context: Context, config: CapsuleConfig, refreshCount: Int): Notification {
         ensureChannel(context)
 
@@ -66,45 +71,101 @@ object CapsuleNotificationFactory {
         )
 
         val title = "${config.businessName} · ${config.mainText}"
-        val detail = "${config.subText} · $nowStr (#$refreshCount)"
-
-        val bounds = context.getSystemService(WindowManager::class.java).currentWindowMetrics.bounds
-        val isLandscape = bounds.width() > bounds.height()
-
-        val expandedWidth = if (isLandscape) {
-            (bounds.width() * 0.70f).toInt()
+        val detail = if (config.showTimestamp) {
+            "${config.subText} · $nowStr (#$refreshCount)"
         } else {
-            bounds.width()
+            config.subText
         }
-        val compactWidth = minOf(bounds.width(), bounds.height())
+
+        val cardBg = CapsuleConfig.parseColorSafe(config.cardBgHex, Color.parseColor("#FF0D1F18"))
+        val titleColor = CapsuleConfig.parseColorSafe(config.titleColorHex, Color.parseColor("#FFECFDF5"))
+        val detailColor = CapsuleConfig.parseColorSafe(config.detailColorHex, Color.parseColor("#FF6EE7B7"))
+        val btnBg = CapsuleConfig.parseColorSafe(config.btnBgHex, Color.parseColor("#FF065F46"))
+        val accentColor = CapsuleConfig.parseColorSafe(config.accentColorHex, Color.parseColor("#FF34D399"))
+
+        val bounds = context.getSystemService(WindowManager::class.java).maximumWindowMetrics.bounds
+        val longSide = maxOf(bounds.width(), bounds.height())
+        val shortSide = minOf(bounds.width(), bounds.height())
+
         val padH = dpToPx(context, 16f)
-        val padTop = if (isLandscape) dpToPx(context, 14f) else getSafeTopPaddingPx(context)
+        val padBottom = dpToPx(context, 12f)
+        val portraitPadTop = getSafeTopPaddingPx(context)
+        val landscapePadTop = dpToPx(context, 12f)
+        val landscapeWidth = (longSide * 0.72f).toInt()
+        val fixedContentPx = dpToPx(context, 64f)
 
         val compactRv = RemoteViews(context.packageName, R.layout.layout_capsule_compact).apply {
-            setInt(R.id.compact_root, "setMinimumWidth", compactWidth)
+            setInt(R.id.compact_root, "setMinimumWidth", shortSide)
+            setInt(R.id.compact_root, "setBackgroundColor", cardBg)
             setTextViewText(R.id.tv_title, title)
+            setTextColor(R.id.tv_title, titleColor)
+            setTextViewTextSize(R.id.tv_title, TypedValue.COMPLEX_UNIT_SP, config.titleSizeSp.coerceAtMost(18f))
             setTextViewText(R.id.tv_detail, detail)
+            setTextColor(R.id.tv_detail, detailColor)
+            setTextViewTextSize(R.id.tv_detail, TypedValue.COMPLEX_UNIT_SP, config.detailSizeSp.coerceAtMost(15f))
+            tintButton(this, R.id.btn_stop, btnBg)
             setOnClickPendingIntent(R.id.compact_root, openAppPi)
             setOnClickPendingIntent(R.id.btn_stop, stopPi)
         }
 
-        val expandedRv = RemoteViews(context.packageName, R.layout.layout_capsule_expanded).apply {
-            setViewPadding(R.id.card_root, padH, padTop, padH, dpToPx(context, 16f))
-            setInt(R.id.card_root, "setMinimumWidth", expandedWidth)
-            setTextViewText(R.id.tv_title, title)
-            setTextViewText(R.id.tv_detail, detail)
-            setOnClickPendingIntent(R.id.card_root, openAppPi)
-            setOnClickPendingIntent(R.id.btn_refresh, refreshPi)
-            setOnClickPendingIntent(R.id.btn_stop, stopPi)
+        val layoutRes = when (config.cardLayoutStyle) {
+            CapsuleConfig.LAYOUT_STANDARD -> R.layout.layout_card_standard
+            CapsuleConfig.LAYOUT_HERO -> R.layout.layout_card_hero
+            CapsuleConfig.LAYOUT_MINIMAL -> R.layout.layout_card_minimal
+            else -> R.layout.layout_card_compact_row
         }
+
+        fun buildExpanded(widthPx: Int, topPadPx: Int): RemoteViews {
+            val fixedTotalHeight = topPadPx + fixedContentPx + padBottom
+            return RemoteViews(context.packageName, layoutRes).apply {
+                setViewPadding(R.id.card_root, padH, topPadPx, padH, padBottom)
+                setInt(R.id.card_root, "setMinimumWidth", widthPx)
+                setInt(R.id.card_root, "setMinimumHeight", fixedTotalHeight)
+                setInt(R.id.card_root, "setBackgroundColor", cardBg)
+
+                setViewVisibility(
+                    R.id.accent_bar,
+                    if (config.showAccentBar) View.VISIBLE else View.GONE
+                )
+                setInt(R.id.accent_bar, "setBackgroundColor", accentColor)
+
+                setTextViewText(R.id.tv_title, title)
+                setTextColor(R.id.tv_title, titleColor)
+                setTextViewTextSize(R.id.tv_title, TypedValue.COMPLEX_UNIT_SP, config.titleSizeSp)
+
+                setTextViewText(R.id.tv_detail, detail)
+                setTextColor(R.id.tv_detail, detailColor)
+                setTextViewTextSize(R.id.tv_detail, TypedValue.COMPLEX_UNIT_SP, config.detailSizeSp)
+
+                setOnClickPendingIntent(R.id.card_root, openAppPi)
+
+                if (config.cardLayoutStyle != CapsuleConfig.LAYOUT_MINIMAL) {
+                    setViewVisibility(
+                        R.id.action_row,
+                        if (config.showActions) View.VISIBLE else View.GONE
+                    )
+                    tintButton(this, R.id.btn_refresh, btnBg)
+                    tintButton(this, R.id.btn_stop, btnBg)
+                    setTextColor(R.id.btn_refresh, accentColor)
+                    setTextViewTextSize(R.id.btn_refresh, TypedValue.COMPLEX_UNIT_SP, config.btnSizeSp)
+                    setTextViewTextSize(R.id.btn_stop, TypedValue.COMPLEX_UNIT_SP, config.btnSizeSp)
+                    setOnClickPendingIntent(R.id.btn_refresh, refreshPi)
+                    setOnClickPendingIntent(R.id.btn_stop, stopPi)
+                }
+            }
+        }
+
+        val portraitExpandedRv = buildExpanded(shortSide, portraitPadTop)
+        val landscapeExpandedRv = buildExpanded(landscapeWidth, landscapePadTop)
+        val dualExpandedRv = RemoteViews(landscapeExpandedRv, portraitExpandedRv)
 
         val notification = Notification.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentTitle(title)
             .setContentText(detail)
             .setCustomContentView(compactRv)
-            .setCustomBigContentView(expandedRv)
-            .setCustomHeadsUpContentView(expandedRv)
+            .setCustomBigContentView(dualExpandedRv)
+            .setCustomHeadsUpContentView(dualExpandedRv)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setCategory(Notification.CATEGORY_SERVICE)
@@ -114,6 +175,18 @@ object CapsuleNotificationFactory {
 
         MagicCapsuleBridge.attach(context, notification, config)
         return notification
+    }
+
+    private fun tintButton(rv: RemoteViews, viewId: Int, color: Int) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            runCatching {
+                rv.setColorStateList(viewId, "setBackgroundTintList", ColorStateList.valueOf(color))
+            }.onFailure {
+                rv.setInt(viewId, "setBackgroundColor", color)
+            }
+        } else {
+            rv.setInt(viewId, "setBackgroundColor", color)
+        }
     }
 
     private fun dpToPx(context: Context, dp: Float): Int =
@@ -126,7 +199,7 @@ object CapsuleNotificationFactory {
     private fun getSafeTopPaddingPx(context: Context): Int {
         val wm = context.getSystemService(WindowManager::class.java)
         val insetsTop = runCatching {
-            wm.currentWindowMetrics.windowInsets.getInsets(
+            wm.maximumWindowMetrics.windowInsets.getInsets(
                 WindowInsets.Type.displayCutout() or WindowInsets.Type.statusBars()
             ).top
         }.getOrDefault(0)

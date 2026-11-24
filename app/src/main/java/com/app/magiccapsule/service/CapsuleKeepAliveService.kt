@@ -4,12 +4,10 @@ import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
 import android.content.pm.ServiceInfo
-import android.hardware.display.DisplayManager
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.view.WindowManager
 import com.app.magiccapsule.capsule.CapsuleNotificationFactory
 import com.app.magiccapsule.data.CapsulePrefs
 import com.app.magiccapsule.model.CapsuleConfig
@@ -22,48 +20,38 @@ class CapsuleKeepAliveService : Service() {
         const val ACTION_MIRROR_NOTIFICATION = "com.app.magiccapsule.ACTION_MIRROR_NOTIFICATION"
         const val ACTION_STOP = "com.app.magiccapsule.ACTION_STOP"
 
+        const val EXTRA_PACKAGE_NAME = "extra_package_name"
         const val EXTRA_APP_NAME = "extra_app_name"
         const val EXTRA_TITLE = "extra_title"
         const val EXTRA_TEXT = "extra_text"
+        const val EXTRA_IS_WHITELISTED = "extra_is_whitelisted"
     }
 
     private lateinit var prefs: CapsulePrefs
-    private lateinit var displayManager: DisplayManager
     private val handler = Handler(Looper.getMainLooper())
     private var config = CapsuleConfig()
     private var refreshCount = 0
     private var isForegroundStarted = false
-    private var lastLandscape: Boolean? = null
+
+    // 记录当前正在镜像的通知来源，刷新样式时不丢失当前通知内容并防止自身包名冲突
+    private var isMirroringActive = false
+    private var mirroredPackageName: String? = null
+    private var mirroredAppName: String = ""
+    private var mirroredTitle: String = ""
+    private var mirroredText: String = ""
 
     private val keepAliveTask = object : Runnable {
         override fun run() {
             refreshCount++
-            // 同步刷新活跃通知快照
             CapsuleNotificationListener.refreshSnapshot()
             publish(startFg = !isForegroundStarted)
             handler.postDelayed(this, config.refreshIntervalSec * 1000L)
         }
     }
 
-    private val displayListener = object : DisplayManager.DisplayListener {
-        override fun onDisplayAdded(displayId: Int) = Unit
-        override fun onDisplayRemoved(displayId: Int) = Unit
-        override fun onDisplayChanged(displayId: Int) {
-            if (!isForegroundStarted) return
-            val b = getSystemService(WindowManager::class.java).currentWindowMetrics.bounds
-            val nowLand = b.width() > b.height()
-            if (nowLand != lastLandscape) {
-                lastLandscape = nowLand
-                publish(startFg = false)
-            }
-        }
-    }
-
     override fun onCreate() {
         super.onCreate()
         prefs = CapsulePrefs(this)
-        displayManager = getSystemService(DisplayManager::class.java)
-        displayManager.registerDisplayListener(displayListener, handler)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -71,40 +59,62 @@ class CapsuleKeepAliveService : Service() {
             ACTION_STOP -> {
                 handler.removeCallbacks(keepAliveTask)
                 isForegroundStarted = false
+                isMirroringActive = false
+                mirroredPackageName = null
+                CapsuleNotificationListener.clearActiveSource()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
             }
             ACTION_REFRESH -> {
-                config = prefs.load()
+                val base = prefs.load()
+                config = if (isMirroringActive && mirroredAppName.isNotBlank()) {
+                    base.copy(
+                        businessName = mirroredAppName,
+                        mainText = mirroredTitle,
+                        subText = mirroredText
+                    )
+                } else {
+                    base
+                }
                 refreshCount++
                 CapsuleNotificationListener.refreshSnapshot()
                 publish(startFg = !isForegroundStarted)
                 return START_STICKY
             }
             ACTION_MIRROR_NOTIFICATION -> {
+                val srcPkg = intent.getStringExtra(EXTRA_PACKAGE_NAME).orEmpty()
+                // 防冲突：拒绝本应用自身包名镜像
+                if (srcPkg == packageName) return START_STICKY
+
                 val base = prefs.load()
-                val appName = intent.getStringExtra(EXTRA_APP_NAME).orEmpty().take(4).ifBlank { base.businessName }
+                val appName = intent.getStringExtra(EXTRA_APP_NAME).orEmpty().ifBlank { base.businessName }
                 val title = intent.getStringExtra(EXTRA_TITLE).orEmpty().ifBlank { base.mainText }
                 val text = intent.getStringExtra(EXTRA_TEXT).orEmpty().ifBlank { title }
+
+                isMirroringActive = true
+                mirroredPackageName = srcPkg.ifBlank { null }
+                mirroredAppName = appName
+                mirroredTitle = title
+                mirroredText = text
+
                 config = base.copy(
                     businessName = appName,
-                    mainText = title.take(12),
-                    subText = text.take(40)
+                    mainText = title,
+                    subText = text
                 )
                 refreshCount++
-                val b = getSystemService(WindowManager::class.java).currentWindowMetrics.bounds
-                lastLandscape = b.width() > b.height()
                 publish(startFg = !isForegroundStarted)
                 handler.removeCallbacks(keepAliveTask)
                 handler.postDelayed(keepAliveTask, config.refreshIntervalSec * 1000L)
                 return START_STICKY
             }
             else -> {
+                isMirroringActive = false
+                mirroredPackageName = null
+                CapsuleNotificationListener.clearActiveSource()
                 config = prefs.load()
                 refreshCount = 1
-                val b = getSystemService(WindowManager::class.java).currentWindowMetrics.bounds
-                lastLandscape = b.width() > b.height()
                 publish(startFg = true)
                 handler.removeCallbacks(keepAliveTask)
                 handler.postDelayed(keepAliveTask, config.refreshIntervalSec * 1000L)
@@ -134,7 +144,6 @@ class CapsuleKeepAliveService : Service() {
 
     override fun onDestroy() {
         handler.removeCallbacks(keepAliveTask)
-        displayManager.unregisterDisplayListener(displayListener)
         super.onDestroy()
     }
 

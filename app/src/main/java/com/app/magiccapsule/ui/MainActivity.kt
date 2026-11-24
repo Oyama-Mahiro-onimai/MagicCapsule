@@ -126,8 +126,7 @@ fun CapsuleScreen(vm: CapsuleViewModel = viewModel()) {
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding)
-                .imePadding(),
+                .padding(innerPadding),
             contentAlignment = Alignment.TopCenter
         ) {
             Column(

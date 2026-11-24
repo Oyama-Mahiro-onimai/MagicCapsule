@@ -36,7 +36,6 @@ class CapsuleViewModel(application: Application) : AndroidViewModel(application)
     fun updateConfig(transform: (CapsuleConfig) -> CapsuleConfig) {
         _uiState.update { state ->
             val updated = transform(state.config)
-            prefs.save(updated)
             state.copy(config = updated)
         }
     }

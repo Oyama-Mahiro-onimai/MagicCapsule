@@ -19,7 +19,12 @@ class CapsuleKeepAliveService : Service() {
     companion object {
         const val ACTION_START = "com.app.magiccapsule.ACTION_START"
         const val ACTION_REFRESH = "com.app.magiccapsule.ACTION_REFRESH"
+        const val ACTION_MIRROR_NOTIFICATION = "com.app.magiccapsule.ACTION_MIRROR_NOTIFICATION"
         const val ACTION_STOP = "com.app.magiccapsule.ACTION_STOP"
+
+        const val EXTRA_APP_NAME = "extra_app_name"
+        const val EXTRA_TITLE = "extra_title"
+        const val EXTRA_TEXT = "extra_text"
     }
 
     private lateinit var prefs: CapsulePrefs
@@ -27,12 +32,15 @@ class CapsuleKeepAliveService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var config = CapsuleConfig()
     private var refreshCount = 0
+    private var isForegroundStarted = false
     private var lastLandscape: Boolean? = null
 
     private val keepAliveTask = object : Runnable {
         override fun run() {
             refreshCount++
-            publish(startFg = false)
+            // 同步刷新活跃通知快照
+            CapsuleNotificationListener.refreshSnapshot()
+            publish(startFg = !isForegroundStarted)
             handler.postDelayed(this, config.refreshIntervalSec * 1000L)
         }
     }
@@ -41,7 +49,7 @@ class CapsuleKeepAliveService : Service() {
         override fun onDisplayAdded(displayId: Int) = Unit
         override fun onDisplayRemoved(displayId: Int) = Unit
         override fun onDisplayChanged(displayId: Int) {
-            if (refreshCount <= 0) return
+            if (!isForegroundStarted) return
             val b = getSystemService(WindowManager::class.java).currentWindowMetrics.bounds
             val nowLand = b.width() > b.height()
             if (nowLand != lastLandscape) {
@@ -62,6 +70,7 @@ class CapsuleKeepAliveService : Service() {
         when (intent?.action) {
             ACTION_STOP -> {
                 handler.removeCallbacks(keepAliveTask)
+                isForegroundStarted = false
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
@@ -69,7 +78,26 @@ class CapsuleKeepAliveService : Service() {
             ACTION_REFRESH -> {
                 config = prefs.load()
                 refreshCount++
-                publish(startFg = false)
+                CapsuleNotificationListener.refreshSnapshot()
+                publish(startFg = !isForegroundStarted)
+                return START_STICKY
+            }
+            ACTION_MIRROR_NOTIFICATION -> {
+                val base = prefs.load()
+                val appName = intent.getStringExtra(EXTRA_APP_NAME).orEmpty().take(4).ifBlank { base.businessName }
+                val title = intent.getStringExtra(EXTRA_TITLE).orEmpty().ifBlank { base.mainText }
+                val text = intent.getStringExtra(EXTRA_TEXT).orEmpty().ifBlank { title }
+                config = base.copy(
+                    businessName = appName,
+                    mainText = title.take(12),
+                    subText = text.take(40)
+                )
+                refreshCount++
+                val b = getSystemService(WindowManager::class.java).currentWindowMetrics.bounds
+                lastLandscape = b.width() > b.height()
+                publish(startFg = !isForegroundStarted)
+                handler.removeCallbacks(keepAliveTask)
+                handler.postDelayed(keepAliveTask, config.refreshIntervalSec * 1000L)
                 return START_STICKY
             }
             else -> {
@@ -88,6 +116,7 @@ class CapsuleKeepAliveService : Service() {
     private fun publish(startFg: Boolean) {
         val notification = CapsuleNotificationFactory.create(this, config, refreshCount)
         if (startFg) {
+            isForegroundStarted = true
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 startForeground(
                     CapsuleNotificationFactory.NOTIFY_ID,

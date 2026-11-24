@@ -4,14 +4,15 @@ import androidx.compose.runtime.Immutable
 
 @Immutable
 data class CapsuleConfig(
-    val businessName: String = "任务",
-    val mainText: String = "服务运行中",
+    val businessName: String = "通知",
+    val mainText: String = "等待新通知",
     val subText: String = "点击卡片返回应用",
     val template: String = TEMPLATE_IMAGE_TEXT,
     val brandColor: Int = 1,
     val enableTimer: Boolean = false,
     val timerMinutes: Int = 5,
-    val refreshIntervalSec: Int = 30
+    val refreshIntervalSec: Int = 30,
+    val autoMirrorNotifications: Boolean = true
 ) {
     companion object {
         const val TEMPLATE_IMAGE_TEXT = "image_text"

@@ -14,6 +14,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -36,20 +37,29 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.app.magiccapsule.model.CapsuleConfig
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -74,8 +84,22 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun CapsuleScreen(vm: CapsuleViewModel = viewModel()) {
     val state by vm.uiState.collectAsState()
+    val notifications by vm.capturedNotifications.collectAsState()
+    val listenerConnected by vm.listenerConnected.collectAsState()
     val config = state.config
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    // 返回页面时自动重新检测通知使用权并刷新活跃通知
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                vm.recheckNotificationAccess()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     val notifPermLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -91,6 +115,14 @@ fun CapsuleScreen(vm: CapsuleViewModel = viewModel()) {
             notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
             action()
+        }
+    }
+
+    fun openNotificationAccessSettings() {
+        runCatching {
+            context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+        }.onFailure {
+            vm.setStatus("请前往：设置 → 隐私/权限 → 通知使用权 → 开启「灵动胶囊助手」")
         }
     }
 
@@ -111,10 +143,9 @@ fun CapsuleScreen(vm: CapsuleViewModel = viewModel()) {
         }
     }
 
-    // 仅响应固定 systemBars，不监听 WindowInsets.ime；键盘由 adjustPan 硬件平移，避免逐帧重组
     Scaffold(
         contentWindowInsets = WindowInsets.systemBars,
-        topBar = { TopAppBar(title = { Text("灵动胶囊助手 v9") }) }
+        topBar = { TopAppBar(title = { Text("灵动胶囊助手 v10") }) }
     ) { innerPadding ->
         Box(
             modifier = Modifier
@@ -131,16 +162,132 @@ fun CapsuleScreen(vm: CapsuleViewModel = viewModel()) {
                 verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 Card(modifier = Modifier.fillMaxWidth()) {
+                    Column(
+                        modifier = Modifier.padding(14.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        Text(
+                            text = if (state.isFrameworkSupported) {
+                                "✅ 荣耀 framework-magic 接口可用"
+                            } else {
+                                "⚠️ 未检测到 framework-magic"
+                            },
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Text(
+                            text = when {
+                                state.hasNotificationAccess && listenerConnected ->
+                                    "✅ 通知使用权已授权（监听服务已连接，实时自动刷新）"
+                                state.hasNotificationAccess ->
+                                    "⏳ 通知使用权已授权（等待系统绑定监听服务）"
+                                else ->
+                                    "❌ 尚未授予「通知使用权」，无法读取其他应用通知"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        if (!state.hasNotificationAccess) {
+                            OutlinedButton(
+                                onClick = { openNotificationAccessSettings() },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("前往开启通知使用权")
+                            }
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
                     Text(
-                        text = if (state.isFrameworkSupported) {
-                            "✅ 已检测到荣耀 framework-magic 灵动胶囊接口"
-                        } else {
-                            "⚠️ 未检测到 framework-magic（仅普通通知模式）"
-                        },
+                        text = "自动将新通知同步到灵动胶囊",
                         style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(14.dp)
+                        modifier = Modifier.weight(1f)
+                    )
+                    Switch(
+                        checked = config.autoMirrorNotifications,
+                        onCheckedChange = { checked ->
+                            vm.updateConfig(saveImmediately = true) {
+                                it.copy(autoMirrorNotifications = checked)
+                            }
+                            vm.setStatus(if (checked) "已开启新通知自动上岛" else "已关闭自动上岛")
+                        }
                     )
                 }
+
+                // 实时读取到的系统通知列表（自动刷新）
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "实时系统通知（${notifications.size} 条，点击推送到胶囊）",
+                        style = MaterialTheme.typography.labelLarge
+                    )
+                    OutlinedButton(onClick = { vm.refreshAll() }) {
+                        Text("刷新")
+                    }
+                }
+
+                if (notifications.isEmpty()) {
+                    Card(modifier = Modifier.fillMaxWidth()) {
+                        Text(
+                            text = if (state.hasNotificationAccess) {
+                                "当前暂无可读取的第三方通知，新通知到达时会自动刷新显示。"
+                            } else {
+                                "开启上方「通知使用权」后，这里会自动展示并实时刷新系统通知。"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(14.dp)
+                        )
+                    }
+                } else {
+                    val timeFmt = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+                    notifications.take(8).forEach { item ->
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { runWithNotifPermission { vm.mirrorToCapsule(item) } }
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(12.dp),
+                                verticalArrangement = Arrangement.spacedBy(2.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(
+                                        text = "${item.appName} · ${item.title}",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Text(
+                                        text = timeFmt.format(Date(item.postTime)),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Text(
+                                    text = item.text,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                    }
+                }
+
+                Text("手动自定义胶囊配置", style = MaterialTheme.typography.labelLarge)
 
                 OutlinedTextField(
                     value = config.businessName,
@@ -214,10 +361,10 @@ fun CapsuleScreen(vm: CapsuleViewModel = viewModel()) {
                     horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     OutlinedButton(
-                        onClick = { vm.refreshCapsule() },
+                        onClick = { openNotificationAccessSettings() },
                         modifier = Modifier.weight(1f)
                     ) {
-                        Text("静默刷新")
+                        Text("通知使用权")
                     }
                     OutlinedButton(
                         onClick = { vm.stopCapsule() },

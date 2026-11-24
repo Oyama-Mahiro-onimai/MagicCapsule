@@ -31,7 +31,18 @@
             android:foregroundServiceType="specialUse">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="Display live user status in Honor Magic Capsule" />
+                android:value="Display live notifications in Honor Magic Capsule" />
+        </service>
+
+        <!-- 通知使用权监听服务 -->
+        <service
+            android:name=".service.CapsuleNotificationListener"
+            android:exported="true"
+            android:label="灵动胶囊通知同步"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
         </service>
     </application>
 </manifest>

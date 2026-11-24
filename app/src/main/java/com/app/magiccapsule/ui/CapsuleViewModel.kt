@@ -8,7 +8,9 @@ import androidx.lifecycle.AndroidViewModel
 import com.app.magiccapsule.capsule.MagicCapsuleBridge
 import com.app.magiccapsule.data.CapsulePrefs
 import com.app.magiccapsule.model.CapsuleConfig
+import com.app.magiccapsule.model.CapturedNotification
 import com.app.magiccapsule.service.CapsuleKeepAliveService
+import com.app.magiccapsule.service.CapsuleNotificationListener
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -18,7 +20,8 @@ import kotlinx.coroutines.flow.update
 data class CapsuleUiState(
     val config: CapsuleConfig = CapsuleConfig(),
     val isFrameworkSupported: Boolean = false,
-    val statusMessage: String = "点击顶部胶囊展开紧凑卡片，点击卡片区域即可返回应用。"
+    val hasNotificationAccess: Boolean = false,
+    val statusMessage: String = "开启通知使用权后，新通知将自动同步展示在灵动胶囊中。"
 )
 
 class CapsuleViewModel(application: Application) : AndroidViewModel(application) {
@@ -28,14 +31,30 @@ class CapsuleViewModel(application: Application) : AndroidViewModel(application)
     private val _uiState = MutableStateFlow(
         CapsuleUiState(
             config = prefs.load(),
-            isFrameworkSupported = MagicCapsuleBridge.isSupported()
+            isFrameworkSupported = MagicCapsuleBridge.isSupported(),
+            hasNotificationAccess = CapsuleNotificationListener.isPermissionGranted(application)
         )
     )
     val uiState: StateFlow<CapsuleUiState> = _uiState.asStateFlow()
 
-    fun updateConfig(transform: (CapsuleConfig) -> CapsuleConfig) {
+    val capturedNotifications: StateFlow<List<CapturedNotification>> =
+        CapsuleNotificationListener.notifications
+
+    val listenerConnected: StateFlow<Boolean> =
+        CapsuleNotificationListener.connected
+
+    fun recheckNotificationAccess() {
+        val granted = CapsuleNotificationListener.isPermissionGranted(getApplication())
+        _uiState.update { it.copy(hasNotificationAccess = granted) }
+        if (granted) {
+            CapsuleNotificationListener.refreshSnapshot()
+        }
+    }
+
+    fun updateConfig(saveImmediately: Boolean = false, transform: (CapsuleConfig) -> CapsuleConfig) {
         _uiState.update { state ->
             val updated = transform(state.config)
+            if (saveImmediately) prefs.save(updated)
             state.copy(config = updated)
         }
     }
@@ -50,13 +69,27 @@ class CapsuleViewModel(application: Application) : AndroidViewModel(application)
         setStatus("已启动：${cfg.businessName} · ${cfg.mainText}")
     }
 
-    fun refreshCapsule() {
+    fun mirrorToCapsule(item: CapturedNotification) {
         val ctx = getApplication<Application>()
         prefs.save(_uiState.value.config)
+        val intent = Intent(ctx, CapsuleKeepAliveService::class.java).apply {
+            action = CapsuleKeepAliveService.ACTION_MIRROR_NOTIFICATION
+            putExtra(CapsuleKeepAliveService.EXTRA_APP_NAME, item.appName)
+            putExtra(CapsuleKeepAliveService.EXTRA_TITLE, item.title)
+            putExtra(CapsuleKeepAliveService.EXTRA_TEXT, item.text)
+        }
+        ContextCompat.startForegroundService(ctx, intent)
+        setStatus("已推送到灵动胶囊：${item.appName} - ${item.title}")
+    }
+
+    fun refreshAll() {
+        val ctx = getApplication<Application>()
+        prefs.save(_uiState.value.config)
+        CapsuleNotificationListener.refreshSnapshot()
         val intent = Intent(ctx, CapsuleKeepAliveService::class.java)
             .setAction(CapsuleKeepAliveService.ACTION_REFRESH)
         ctx.startService(intent)
-        setStatus("已发送静默刷新指令")
+        setStatus("已刷新通知列表与灵动胶囊")
     }
 
     fun stopCapsule() {

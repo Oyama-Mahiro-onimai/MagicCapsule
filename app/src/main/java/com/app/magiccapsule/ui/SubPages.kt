@@ -1,6 +1,9 @@
 package com.app.magiccapsule.ui
 
 import android.graphics.Color as AndroidColor
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import com.app.magiccapsule.service.NotificationIconStore
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -18,7 +21,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.FilterChip
@@ -26,10 +31,13 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -40,13 +48,24 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.font.FontFamily
 import com.app.magiccapsule.R
+import com.app.magiccapsule.crash.AppLogger
+import com.app.magiccapsule.crash.GlobalCrashHandler
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.app.magiccapsule.model.CapsuleConfig
 import com.app.magiccapsule.model.CapturedNotification
 import com.app.magiccapsule.model.InstalledApp
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.roundToInt
 
 @Composable
 fun WhitelistManagerPage(
@@ -212,6 +231,26 @@ fun ColorEditorPage(
     onUpdateConfig: (Boolean, (CapsuleConfig) -> CapsuleConfig) -> Unit,
     onApply: () -> Unit
 ) {
+    val targets = remember {
+        listOf("通知/卡片底色", "标题色", "副文色", "按钮底色", "强调色")
+    }
+    var selectedTarget by remember { mutableIntStateOf(0) }
+
+    val currentHex = when (selectedTarget) {
+        0 -> config.cardBgHex
+        1 -> config.titleColorHex
+        2 -> config.detailColorHex
+        3 -> config.btnBgHex
+        else -> config.accentColorHex
+    }
+    val currentFallback = when (selectedTarget) {
+        0 -> AndroidColor.parseColor("#FF0D1F18")
+        1 -> AndroidColor.parseColor("#FFECFDF5")
+        2 -> AndroidColor.parseColor("#FF6EE7B7")
+        3 -> AndroidColor.parseColor("#FF065F46")
+        else -> AndroidColor.parseColor("#FF34D399")
+    }
+
     Column(
         modifier = Modifier
             .widthIn(max = 600.dp)
@@ -220,24 +259,110 @@ fun ColorEditorPage(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("实时效果预览", style = MaterialTheme.typography.labelLarge)
+        Text("实时效果预览（含透明度与灰度）", style = MaterialTheme.typography.labelLarge)
         LiveCardPreview(config)
 
-        Text("颜色参数（支持色块点选或输入 #AARRGGBB）", style = MaterialTheme.typography.labelLarge)
-        ColorPickerField("卡片背景色 / 底色", config.cardBgHex, AndroidColor.parseColor("#FF0D1F18")) { hex ->
-            onUpdateConfig(false) { it.copy(cardBgHex = hex) }
+        // 背景透明度与灰度专属控制卡
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                StatusIconRow(
+                    iconRes = R.drawable.ic_px_tune,
+                    text = "通知背景透明度与灰度",
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Column {
+                    Text(
+                        text = "背景不透明度：${config.cardBgAlphaPercent}%（0% 完全透明，100% 纯实色）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Slider(
+                        value = config.cardBgAlphaPercent.toFloat(),
+                        onValueChange = { v ->
+                            onUpdateConfig(false) {
+                                it.copy(cardBgAlphaPercent = v.roundToInt().coerceIn(0, 100))
+                            }
+                        },
+                        valueRange = 0f..100f
+                    )
+                }
+                Column {
+                    Text(
+                        text = "背景灰度：${config.cardBgGrayscalePercent}%（0% 原色，100% 纯黑白灰）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Slider(
+                        value = config.cardBgGrayscalePercent.toFloat(),
+                        onValueChange = { v ->
+                            onUpdateConfig(false) {
+                                it.copy(cardBgGrayscalePercent = v.roundToInt().coerceIn(0, 100))
+                            }
+                        },
+                        valueRange = 0f..100f
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("通知中心跟随系统毛玻璃", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            text = "下拉通知栏背景完全透明融合系统毛玻璃，顶部胶囊仍保留自定义底色",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = config.compactBgFollowSystemGlass,
+                        onCheckedChange = { c ->
+                            onUpdateConfig(true) { it.copy(compactBgFollowSystemGlass = c) }
+                        }
+                    )
+                }
+            }
         }
-        ColorPickerField("标题字体颜色", config.titleColorHex, AndroidColor.parseColor("#FFECFDF5")) { hex ->
-            onUpdateConfig(false) { it.copy(titleColorHex = hex) }
+
+        Text("选择要调色的部位", style = MaterialTheme.typography.labelLarge)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            targets.forEachIndexed { idx, name ->
+                FilterChip(
+                    selected = selectedTarget == idx,
+                    onClick = { selectedTarget = idx },
+                    label = { Text(name) }
+                )
+            }
         }
-        ColorPickerField("副文 / 详情字体颜色", config.detailColorHex, AndroidColor.parseColor("#FF6EE7B7")) { hex ->
-            onUpdateConfig(false) { it.copy(detailColorHex = hex) }
-        }
-        ColorPickerField("按钮底色", config.btnBgHex, AndroidColor.parseColor("#FF065F46")) { hex ->
-            onUpdateConfig(false) { it.copy(btnBgHex = hex) }
-        }
-        ColorPickerField("前景色 / 强调色", config.accentColorHex, AndroidColor.parseColor("#FF34D399")) { hex ->
-            onUpdateConfig(false) { it.copy(accentColorHex = hex) }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                InteractiveColorBoard(
+                    label = targets[selectedTarget],
+                    hexValue = currentHex,
+                    fallbackColor = currentFallback,
+                    onHexChange = { hex ->
+                        onUpdateConfig(false) { cfg ->
+                            when (selectedTarget) {
+                                0 -> cfg.copy(cardBgHex = hex)
+                                1 -> cfg.copy(titleColorHex = hex)
+                                2 -> cfg.copy(detailColorHex = hex)
+                                3 -> cfg.copy(btnBgHex = hex)
+                                else -> cfg.copy(accentColorHex = hex)
+                            }
+                        }
+                    }
+                )
+            }
         }
 
         Button(
@@ -361,6 +486,65 @@ fun ManualConfigPage(
             singleLine = true,
             modifier = Modifier.fillMaxWidth()
         )
+
+        val manualCtx = LocalContext.current
+        val iconPickerLauncher = rememberLauncherForActivityResult(
+            contract = ActivityResultContracts.GetContent()
+        ) { uri ->
+            if (uri != null) {
+                val saved = NotificationIconStore.saveCustomManualIcon(manualCtx, uri)
+                if (saved != null) {
+                    onUpdateConfig(true) { it.copy(manualIconPreset = CapsuleConfig.ICON_CUSTOM_IMAGE) }
+                }
+            }
+        }
+
+        Text("手动胶囊图标（无通知时展示；有通知时自动替换为通知图标）", style = MaterialTheme.typography.labelLarge)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            CapsuleConfig.MANUAL_ICON_PRESETS.forEach { (presetKey, presetLabel) ->
+                FilterChip(
+                    selected = config.manualIconPreset == presetKey,
+                    onClick = {
+                        if (presetKey == CapsuleConfig.ICON_CUSTOM_IMAGE) {
+                            iconPickerLauncher.launch("image/*")
+                        } else {
+                            onUpdateConfig(true) { it.copy(manualIconPreset = presetKey) }
+                        }
+                    },
+                    label = { Text(presetLabel) }
+                )
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                    Text("有通知时自动套用横幅样式并替换文案与图标", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        text = "沿用手动胶囊引擎启动，实时替换为来信应用的横幅配色、文本与图标",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Switch(
+                    checked = config.capsuleFollowBannerStyle,
+                    onCheckedChange = { c ->
+                        onUpdateConfig(true) { it.copy(capsuleFollowBannerStyle = c) }
+                    }
+                )
+            }
+        }
 
         Text("荣耀状态栏胶囊模板", style = MaterialTheme.typography.labelLarge)
         Row(
@@ -523,6 +707,589 @@ fun NotificationDetailPage(
                 )
                 Spacer(Modifier.width(4.dp))
                 Text(if (isWhitelisted) "移出白名单" else "加入白名单")
+            }
+        }
+    }
+}
+
+
+@Composable
+fun BannerHijackSettingsPage(
+    state: CapsuleUiState,
+    overlayConnected: Boolean,
+    overlayStatus: String,
+    capsuleStatus: String,
+    lastInterceptedSummary: String,
+    shizukuAlive: Boolean,
+    shizukuGranted: Boolean,
+    shizukuStatus: String,
+    onRequestShizuku: () -> Unit,
+    onOpenAccessibilitySettings: () -> Unit,
+    onCopyAdbCommand: () -> Unit,
+    onToggleBanner: (Boolean, Boolean) -> Unit,
+    onDurationChange: (Int) -> Unit,
+    onUpdateConfig: (Boolean, (CapsuleConfig) -> CapsuleConfig) -> Unit,
+    onTestBanner: () -> Unit,
+    onRestoreSystemHeadsUp: () -> Unit
+) {
+    val config = state.config
+    val adbCmd = "adb shell pm grant com.app.magiccapsule android.permission.WRITE_SECURE_SETTINGS"
+
+    Column(
+        modifier = Modifier
+            .widthIn(max = 600.dp)
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text("方案一：无障碍顶层覆盖横幅", style = MaterialTheme.typography.labelLarge)
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                StatusIconRow(
+                    iconRes = if (overlayConnected) R.drawable.ic_px_check_circle else R.drawable.ic_px_info,
+                    text = when {
+                        overlayConnected -> "无障碍置顶层服务运行中（TYPE_ACCESSIBILITY_OVERLAY，不读取屏幕内容）"
+                        state.hasAccessibilityEnabled -> "无障碍服务已开启，等待系统绑定"
+                        else -> "尚未开启「灵动胶囊顶层横幅」无障碍服务"
+                    },
+                    tint = if (overlayConnected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
+                )
+                StatusIconRow(
+                    iconRes = if (state.hasWriteSecureSettings) R.drawable.ic_px_shield else R.drawable.ic_px_info,
+                    text = if (state.hasWriteSecureSettings) {
+                        "WRITE_SECURE_SETTINGS 已授权 · 当前系统横幅：${if (state.isSystemHeadsUpEnabled) "开启" else "已屏蔽"}"
+                    } else {
+                        "未授予 WRITE_SECURE_SETTINGS（可选，授权后可自动屏蔽重复的系统原生横幅）"
+                    },
+                    tint = if (state.hasWriteSecureSettings) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    textColor = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                StatusIconRow(
+                    iconRes = if (shizukuGranted) R.drawable.ic_px_check_circle else R.drawable.ic_px_shield,
+                    text = "Shizuku：$shizukuStatus",
+                    tint = if (shizukuGranted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                    textColor = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Button(
+                    onClick = onRequestShizuku,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(
+                        painter = painterResource(id = R.drawable.ic_px_shield),
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        when {
+                            state.hasWriteSecureSettings -> "已获得 WRITE_SECURE_SETTINGS（点击复检）"
+                            shizukuGranted -> "通过 Shizuku 一键授予系统横幅控制权"
+                            shizukuAlive -> "申请 Shizuku 授权并自动配置权限"
+                            else -> "检测并申请 Shizuku 授权"
+                        }
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = onOpenAccessibilitySettings,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("开启无障碍服务")
+                    }
+                    OutlinedButton(
+                        onClick = onCopyAdbCommand,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("复制 ADB 命令")
+                    }
+                }
+                Text(
+                    text = adbCmd,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary
+                )
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("启用顶层覆盖横幅", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            text = "收到新通知时，在状态栏/挖孔与系统横幅层级之上弹出自定义横幅",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = config.enableOverlayBanner,
+                        onCheckedChange = { c ->
+                            onToggleBanner(c, if (c) config.suppressSystemHeadsUp else false)
+                        }
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("屏蔽重复的系统原生横幅", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            text = "需先通过 ADB 授予 WRITE_SECURE_SETTINGS；服务停止时自动恢复",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = config.suppressSystemHeadsUp,
+                        enabled = state.hasWriteSecureSettings && config.enableOverlayBanner,
+                        onCheckedChange = { c -> onToggleBanner(config.enableOverlayBanner, c) }
+                    )
+                }
+
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = "顶层横幅停留时长：${config.overlayBannerDurationSec} 秒",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Slider(
+                        value = config.overlayBannerDurationSec.toFloat(),
+                        onValueChange = { onDurationChange(it.roundToInt().coerceIn(2, 15)) },
+                        valueRange = 2f..15f
+                    )
+                }
+            }
+        }
+
+        // 横幅上下 px 位置与厚度控制
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                StatusIconRow(
+                    iconRes = R.drawable.ic_px_tune,
+                    text = "横幅上下像素（px）精确调节",
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "上下位置偏移：${config.overlayBannerOffsetYPx} px",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    onUpdateConfig(true) {
+                                        it.copy(overlayBannerOffsetYPx = (it.overlayBannerOffsetYPx - 10).coerceIn(-120, 360))
+                                    }
+                                }
+                            ) { Text("-10px") }
+                            OutlinedButton(
+                                onClick = {
+                                    onUpdateConfig(true) {
+                                        it.copy(overlayBannerOffsetYPx = (it.overlayBannerOffsetYPx + 10).coerceIn(-120, 360))
+                                    }
+                                }
+                            ) { Text("+10px") }
+                        }
+                    }
+                    Slider(
+                        value = config.overlayBannerOffsetYPx.toFloat(),
+                        onValueChange = { v ->
+                            onUpdateConfig(false) {
+                                it.copy(overlayBannerOffsetYPx = v.roundToInt().coerceIn(-120, 360))
+                            }
+                        },
+                        valueRange = -120f..360f
+                    )
+                }
+
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "上下内边距（厚度）：${config.overlayBannerPaddingVPx} px",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    onUpdateConfig(true) {
+                                        it.copy(overlayBannerPaddingVPx = (it.overlayBannerPaddingVPx - 4).coerceIn(8, 120))
+                                    }
+                                }
+                            ) { Text("-4px") }
+                            OutlinedButton(
+                                onClick = {
+                                    onUpdateConfig(true) {
+                                        it.copy(overlayBannerPaddingVPx = (it.overlayBannerPaddingVPx + 4).coerceIn(8, 120))
+                                    }
+                                }
+                            ) { Text("+4px") }
+                        }
+                    }
+                    Slider(
+                        value = config.overlayBannerPaddingVPx.toFloat(),
+                        onValueChange = { v ->
+                            onUpdateConfig(false) {
+                                it.copy(overlayBannerPaddingVPx = v.roundToInt().coerceIn(8, 120))
+                            }
+                        },
+                        valueRange = 8f..120f
+                    )
+                }
+            }
+        }
+
+        // 横幅独立颜色与不透明度自定义
+        val bannerTargets = remember { listOf("横幅底色", "横幅标题色", "横幅副文色") }
+        var bannerColorTarget by remember { mutableIntStateOf(0) }
+        val bannerCurrentHex = when (bannerColorTarget) {
+            0 -> config.overlayBannerBgHex
+            1 -> config.overlayBannerTitleColorHex
+            else -> config.overlayBannerDetailColorHex
+        }
+        val bannerFallback = when (bannerColorTarget) {
+            0 -> AndroidColor.parseColor("#FF101816")
+            1 -> AndroidColor.parseColor("#FFFFFFFF")
+            else -> AndroidColor.parseColor("#FFB8D8CC")
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("横幅颜色自定义", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    TextButton(
+                        onClick = {
+                            onUpdateConfig(true) {
+                                it.copy(
+                                    overlayBannerBgHex = it.cardBgHex,
+                                    overlayBannerTitleColorHex = it.titleColorHex,
+                                    overlayBannerDetailColorHex = it.detailColorHex
+                                )
+                            }
+                        }
+                    ) { Text("同步外观页配色") }
+                }
+
+                Column {
+                    Text(
+                        text = "横幅背景不透明度：${config.overlayBannerAlphaPercent}%",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Slider(
+                        value = config.overlayBannerAlphaPercent.toFloat(),
+                        onValueChange = { v ->
+                            onUpdateConfig(false) {
+                                it.copy(overlayBannerAlphaPercent = v.roundToInt().coerceIn(20, 100))
+                            }
+                        },
+                        valueRange = 20f..100f
+                    )
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    bannerTargets.forEachIndexed { idx, name ->
+                        FilterChip(
+                            selected = bannerColorTarget == idx,
+                            onClick = { bannerColorTarget = idx },
+                            label = { Text(name) }
+                        )
+                    }
+                }
+
+                InteractiveColorBoard(
+                    label = bannerTargets[bannerColorTarget],
+                    hexValue = bannerCurrentHex,
+                    fallbackColor = bannerFallback,
+                    onHexChange = { hex ->
+                        onUpdateConfig(false) { cfg ->
+                            when (bannerColorTarget) {
+                                0 -> cfg.copy(overlayBannerBgHex = hex)
+                                1 -> cfg.copy(overlayBannerTitleColorHex = hex)
+                                else -> cfg.copy(overlayBannerDetailColorHex = hex)
+                            }
+                        }
+                    }
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Button(
+                onClick = onTestBanner,
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(
+                    painter = painterResource(id = R.drawable.ic_px_play),
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(Modifier.width(6.dp))
+                Text("测试弹出横幅")
+            }
+            OutlinedButton(
+                onClick = onRestoreSystemHeadsUp,
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(
+                    painter = painterResource(id = R.drawable.ic_px_refresh),
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp)
+                )
+                Spacer(Modifier.width(6.dp))
+                Text("恢复原生横幅")
+            }
+        }
+
+        StatusIconRow(
+            iconRes = R.drawable.ic_px_info,
+            text = "监听捕获：$lastInterceptedSummary\n顶层横幅：$overlayStatus\n灵动胶囊：$capsuleStatus",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            textColor = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+    }
+}
+
+
+@Composable
+fun CrashLogViewerPage(
+    onStatusMessage: (String) -> Unit
+) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    var logText by remember { mutableStateOf("正在读取崩溃日志...") }
+    var reloadTick by remember { mutableIntStateOf(0) }
+    var showCrashConfirm by remember { mutableStateOf(false) }
+    val logPath = remember { GlobalCrashHandler.getLogFile(context).absolutePath }
+
+    if (showCrashConfirm) {
+        AlertDialog(
+            onDismissRequest = { showCrashConfirm = false },
+            title = { Text("确认触发模拟崩溃？") },
+            text = { Text("将抛出一条测试未捕获异常，用来验证 GlobalCrashHandler 是否正常弹窗提示、写入 crash_log.txt 并安全退出。重启应用后回到此页即可核对日志。") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showCrashConfirm = false
+                        throw RuntimeException("MagicCapsule 手动崩溃自检测试 (v32.0.0)")
+                    }
+                ) { Text("确认触发", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCrashConfirm = false }) { Text("取消") }
+            }
+        )
+    }
+
+    LaunchedEffect(reloadTick) {
+        logText = withContext(Dispatchers.IO) {
+            GlobalCrashHandler.readCrashLog(context).ifBlank {
+                "暂无崩溃日志记录（应用运行稳定）。"
+            }
+        }
+    }
+
+    Column(
+        modifier = Modifier
+            .widthIn(max = 600.dp)
+            .fillMaxSize()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(
+            text = "日志文件：$logPath",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = { reloadTick++ },
+                modifier = Modifier.weight(1f)
+            ) { Text("刷新") }
+            OutlinedButton(
+                onClick = {
+                    clipboard.setText(AnnotatedString(logText))
+                    onStatusMessage("已复制崩溃日志到剪贴板")
+                },
+                modifier = Modifier.weight(1f)
+            ) { Text("复制") }
+            OutlinedButton(
+                onClick = {
+                    GlobalCrashHandler.clearCrashLog(context)
+                    reloadTick++
+                    onStatusMessage("已清空崩溃日志")
+                },
+                modifier = Modifier.weight(1f)
+            ) { Text("清空") }
+        }
+        Button(
+            onClick = { showCrashConfirm = true },
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.error,
+                contentColor = MaterialTheme.colorScheme.onError
+            ),
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Text("手动触发模拟崩溃（自检崩溃捕获与日志写入）")
+        }
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+        ) {
+            SelectionContainer {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(12.dp)
+                ) {
+                    Text(
+                        text = logText,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
+            }
+        }
+    }
+}
+
+
+@Composable
+fun RuntimeLogViewerPage(
+    onStatusMessage: (String) -> Unit
+) {
+    val context = LocalContext.current
+    val clipboard = LocalClipboardManager.current
+    val filters = remember { listOf("全部", "Notif", "Capsule", "Banner", "[E/") }
+    val filterLabels = remember { listOf("全部", "通知监听", "灵动胶囊", "顶层横幅", "仅错误") }
+    var selectedFilter by remember { mutableIntStateOf(0) }
+    var reloadTick by remember { mutableIntStateOf(0) }
+    var lines by remember { mutableStateOf<List<String>>(emptyList()) }
+
+    LaunchedEffect(reloadTick) {
+        lines = withContext(Dispatchers.IO) { AppLogger.readLogs(context) }
+    }
+
+    val filteredLines = remember(lines, selectedFilter) {
+        val key = filters[selectedFilter]
+        if (selectedFilter == 0) lines else lines.filter { it.contains(key) }
+    }
+    val displayText = remember(filteredLines) {
+        if (filteredLines.isEmpty()) "暂无匹配的运行日志。" else filteredLines.joinToString("\n")
+    }
+
+    Column(
+        modifier = Modifier
+            .widthIn(max = 600.dp)
+            .fillMaxSize()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            filterLabels.forEachIndexed { idx, label ->
+                FilterChip(
+                    selected = selectedFilter == idx,
+                    onClick = { selectedFilter = idx },
+                    label = { Text(label) }
+                )
+            }
+        }
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = { reloadTick++ },
+                modifier = Modifier.weight(1f)
+            ) { Text("刷新(${filteredLines.size})") }
+            OutlinedButton(
+                onClick = {
+                    clipboard.setText(AnnotatedString(displayText))
+                    onStatusMessage("已复制运行日志到剪贴板")
+                },
+                modifier = Modifier.weight(1f)
+            ) { Text("复制") }
+            OutlinedButton(
+                onClick = {
+                    AppLogger.clear(context)
+                    reloadTick++
+                    onStatusMessage("已清空运行日志")
+                },
+                modifier = Modifier.weight(1f)
+            ) { Text("清空") }
+        }
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f)
+        ) {
+            SelectionContainer {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(12.dp)
+                ) {
+                    Text(
+                        text = displayText,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
             }
         }
     }

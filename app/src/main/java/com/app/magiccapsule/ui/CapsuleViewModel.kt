@@ -8,6 +8,7 @@ import androidx.compose.runtime.Immutable
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.app.magiccapsule.capsule.CapsulePublisher
 import com.app.magiccapsule.capsule.MagicCapsuleBridge
 import com.app.magiccapsule.data.CapsulePrefs
 import com.app.magiccapsule.model.CapsuleConfig
@@ -15,6 +16,12 @@ import com.app.magiccapsule.model.CapturedNotification
 import com.app.magiccapsule.model.InstalledApp
 import com.app.magiccapsule.service.CapsuleKeepAliveService
 import com.app.magiccapsule.service.CapsuleNotificationListener
+import com.app.magiccapsule.service.BannerAction
+import com.app.magiccapsule.service.CapsuleOverlayAccessibilityService
+import com.app.magiccapsule.service.ActiveMirroredPayload
+import com.app.magiccapsule.service.NotificationIconStore
+import com.app.magiccapsule.service.ShizukuBridge
+import com.app.magiccapsule.service.SystemHeadsUpController
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -27,7 +34,10 @@ data class CapsuleUiState(
     val config: CapsuleConfig = CapsuleConfig(),
     val isFrameworkSupported: Boolean = false,
     val hasNotificationAccess: Boolean = false,
-    val statusMessage: String = "白名单应用在自动模式下不受刷新频率限制；点选下方通知可单独锁定。"
+    val hasAccessibilityEnabled: Boolean = false,
+    val hasWriteSecureSettings: Boolean = false,
+    val isSystemHeadsUpEnabled: Boolean = true,
+    val statusMessage: String = "支持荣耀原生灵动胶囊与无障碍顶层覆盖横幅接管。"
 )
 
 class CapsuleViewModel(application: Application) : AndroidViewModel(application) {
@@ -38,7 +48,10 @@ class CapsuleViewModel(application: Application) : AndroidViewModel(application)
         CapsuleUiState(
             config = prefs.load(),
             isFrameworkSupported = MagicCapsuleBridge.isSupported(),
-            hasNotificationAccess = CapsuleNotificationListener.isPermissionGranted(application)
+            hasNotificationAccess = CapsuleNotificationListener.isPermissionGranted(application),
+            hasAccessibilityEnabled = CapsuleOverlayAccessibilityService.isServiceEnabled(application),
+            hasWriteSecureSettings = SystemHeadsUpController.hasPermission(application),
+            isSystemHeadsUpEnabled = SystemHeadsUpController.isSystemHeadsUpEnabled(application)
         )
     )
     val uiState: StateFlow<CapsuleUiState> = _uiState.asStateFlow()
@@ -48,6 +61,22 @@ class CapsuleViewModel(application: Application) : AndroidViewModel(application)
 
     val listenerConnected: StateFlow<Boolean> =
         CapsuleNotificationListener.connected
+
+    val overlayConnected: StateFlow<Boolean> =
+        CapsuleOverlayAccessibilityService.connected
+
+    val overlayStatus: StateFlow<String> =
+        CapsuleOverlayAccessibilityService.lastOverlayStatus
+
+    val capsuleStatus: StateFlow<String> =
+        CapsulePublisher.lastCapsuleStatus
+
+    val lastInterceptedSummary: StateFlow<String> =
+        CapsuleNotificationListener.lastInterceptedSummary
+
+    val shizukuAlive: StateFlow<Boolean> = ShizukuBridge.binderAlive
+    val shizukuGranted: StateFlow<Boolean> = ShizukuBridge.permissionGranted
+    val shizukuStatus: StateFlow<String> = ShizukuBridge.statusText
 
     val pinnedKey: StateFlow<String?> =
         CapsuleNotificationListener.pinnedKey
@@ -63,6 +92,40 @@ class CapsuleViewModel(application: Application) : AndroidViewModel(application)
 
     init {
         loadInstalledApps()
+        viewModelScope.launch(Dispatchers.IO) {
+            ShizukuBridge.init {
+                autoGrantViaShizuku()
+            }
+        }
+    }
+
+    fun requestShizukuAndGrant() {
+        val aliveAndGranted = ShizukuBridge.binderAlive.value && ShizukuBridge.permissionGranted.value
+        if (aliveAndGranted) {
+            autoGrantViaShizuku()
+        } else {
+            val ok = ShizukuBridge.requestPermission()
+            if (!ok) {
+                setStatus(ShizukuBridge.statusText.value)
+            }
+        }
+    }
+
+    private fun autoGrantViaShizuku() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val ctx = getApplication<Application>()
+            val (ok, msg) = ShizukuBridge.grantWriteSecureSettings(ctx)
+            if (ok) {
+                val cfg = _uiState.value.config
+                if (cfg.enableOverlayBanner && cfg.suppressSystemHeadsUp &&
+                    CapsuleOverlayAccessibilityService.connected.value
+                ) {
+                    SystemHeadsUpController.setSystemHeadsUpSuppressed(ctx, true)
+                }
+            }
+            recheckAllPermissions()
+            setStatus(msg)
+        }
     }
 
     fun loadInstalledApps() {
@@ -73,7 +136,7 @@ class CapsuleViewModel(application: Application) : AndroidViewModel(application)
             val pm = ctx.packageManager
             val selfPkg = ctx.packageName
             val list = runCatching {
-                pm.getInstalledApplications(PackageManager.GET_META_DATA)
+                pm.getInstalledApplications(0)
                     .asSequence()
                     .filter { it.packageName != selfPkg }
                     .map { ai ->
@@ -109,7 +172,7 @@ class CapsuleViewModel(application: Application) : AndroidViewModel(application)
             }
             cfg.copy(autoWhitelistPackages = next)
         }
-        setStatus(if (added) "✅ 已加入自动模式白名单（不受刷新频率限制）：$pkg" else "已移出白名单：$pkg")
+        setStatus(if (added) "已加入自动模式白名单（不受刷新频率限制）：$pkg" else "已移出白名单：$pkg")
     }
 
     fun clearWhitelist() {
@@ -117,12 +180,80 @@ class CapsuleViewModel(application: Application) : AndroidViewModel(application)
         setStatus("已清空自动模式白名单")
     }
 
-    fun recheckNotificationAccess() {
-        val granted = CapsuleNotificationListener.isPermissionGranted(getApplication())
-        _uiState.update { it.copy(hasNotificationAccess = granted) }
-        if (granted) {
-            CapsuleNotificationListener.refreshSnapshot()
+    fun recheckAllPermissions() {
+        viewModelScope.launch(Dispatchers.IO) {
+            val ctx = getApplication<Application>()
+            ShizukuBridge.refreshState(autoRequest = false, triggerAutoGrantIfNeeded = false)
+            val notif = CapsuleNotificationListener.isPermissionGranted(ctx)
+            val a11y = CapsuleOverlayAccessibilityService.isServiceEnabled(ctx)
+            val secure = SystemHeadsUpController.hasPermission(ctx)
+            val headsUp = SystemHeadsUpController.isSystemHeadsUpEnabled(ctx)
+            _uiState.update {
+                it.copy(
+                    hasNotificationAccess = notif,
+                    hasAccessibilityEnabled = a11y,
+                    hasWriteSecureSettings = secure,
+                    isSystemHeadsUpEnabled = headsUp
+                )
+            }
+            if (notif) {
+                CapsuleNotificationListener.refreshSnapshot(force = false)
+            }
         }
+    }
+
+    fun persistConfig() {
+        val cfg = _uiState.value.config
+        viewModelScope.launch(Dispatchers.IO) {
+            prefs.save(cfg)
+        }
+    }
+
+    fun updateOverlayBannerConfig(enableOverlay: Boolean, suppressHeadsUp: Boolean) {
+        val ctx = getApplication<Application>()
+        updateConfig(saveImmediately = true) {
+            it.copy(
+                enableOverlayBanner = enableOverlay,
+                suppressSystemHeadsUp = suppressHeadsUp
+            )
+        }
+        val shouldSuppress = enableOverlay && suppressHeadsUp && CapsuleOverlayAccessibilityService.connected.value
+        if (SystemHeadsUpController.hasPermission(ctx)) {
+            SystemHeadsUpController.setSystemHeadsUpSuppressed(ctx, shouldSuppress)
+        }
+        recheckAllPermissions()
+    }
+
+    fun testOverlayBanner() {
+        val cfg = _uiState.value.config
+        prefs.save(cfg)
+        val ctx = getApplication<Application>()
+        val selfIcon = NotificationIconStore.resolveAppIconBitmap(ctx, ctx.packageName)
+        val shown = CapsuleOverlayAccessibilityService.showBanner(
+            appName = cfg.businessName.ifBlank { "灵动胶囊助手" },
+            packageName = ctx.packageName,
+            title = "顶层横幅测试",
+            text = "上下偏移 ${cfg.overlayBannerOffsetYPx}px · 上下内边距 ${cfg.overlayBannerPaddingVPx}px",
+            contentIntent = null,
+            iconBitmap = selfIcon,
+            actions = listOf(
+                BannerAction("标记已读（示例）", null, hasRemoteInput = false),
+                BannerAction("左右滑动可关闭", null, hasRemoteInput = false)
+            ),
+            config = cfg
+        )
+        setStatus(
+            if (shown) "已弹出顶层覆盖横幅（停留 ${cfg.overlayBannerDurationSec} 秒）"
+            else "请先在系统无障碍设置中开启「灵动胶囊顶层横幅」"
+        )
+    }
+
+    fun restoreSystemHeadsUp() {
+        val ctx = getApplication<Application>()
+        updateConfig(saveImmediately = true) { it.copy(suppressSystemHeadsUp = false) }
+        val ok = SystemHeadsUpController.restoreDefault(ctx)
+        recheckAllPermissions()
+        setStatus(if (ok) "已恢复系统原生横幅通知" else "未授予 WRITE_SECURE_SETTINGS，无需恢复或请通过 ADB 恢复")
     }
 
     fun updateConfig(saveImmediately: Boolean = false, transform: (CapsuleConfig) -> CapsuleConfig) {
@@ -147,42 +278,49 @@ class CapsuleViewModel(application: Application) : AndroidViewModel(application)
     fun selectAndPinNotification(item: CapturedNotification) {
         val ctx = getApplication<Application>()
         prefs.save(_uiState.value.config)
-        // 同时锁定通知 key 与发起应用包名，防止冲突
+        val payload = NotificationIconStore.getPayload(item.key) ?: ActiveMirroredPayload(
+            key = item.key,
+            packageName = item.packageName,
+            appName = item.appName,
+            title = item.title,
+            text = item.text,
+            iconBitmap = NotificationIconStore.resolveAppIconBitmap(ctx, item.packageName),
+            contentIntent = null,
+            actions = emptyList()
+        )
         CapsuleNotificationListener.pinNotification(item.key, item.packageName)
-        val intent = Intent(ctx, CapsuleKeepAliveService::class.java).apply {
-            action = CapsuleKeepAliveService.ACTION_MIRROR_NOTIFICATION
-            putExtra(CapsuleKeepAliveService.EXTRA_PACKAGE_NAME, item.packageName)
-            putExtra(CapsuleKeepAliveService.EXTRA_APP_NAME, item.appName)
-            putExtra(CapsuleKeepAliveService.EXTRA_TITLE, item.title)
-            putExtra(CapsuleKeepAliveService.EXTRA_TEXT, item.text)
-            putExtra(CapsuleKeepAliveService.EXTRA_IS_WHITELISTED, true)
-        }
-        ContextCompat.startForegroundService(ctx, intent)
-        setStatus("📌 已锁定展示：${item.appName}（${item.packageName}）")
+        CapsulePublisher.publishMirrored(
+            context = ctx,
+            baseConfig = _uiState.value.config,
+            payload = payload,
+            isPinned = true
+        )
+        setStatus("已锁定展示：${item.appName}（${item.packageName}）")
     }
 
     fun unpinNotification() {
-        CapsuleNotificationListener.pinNotification(null, null)
-        setStatus("已解除锁定，恢复按自动规则接收新通知")
+        CapsuleNotificationListener.unpinAndDismiss(getApplication())
+        setStatus("已取消选中并同步关闭当前胶囊显示")
     }
 
     fun refreshAll() {
         val ctx = getApplication<Application>()
-        prefs.save(_uiState.value.config)
-        CapsuleNotificationListener.refreshSnapshot()
-        val intent = Intent(ctx, CapsuleKeepAliveService::class.java)
-            .setAction(CapsuleKeepAliveService.ACTION_REFRESH)
-        ctx.startService(intent)
+        val cfg = _uiState.value.config
+        prefs.save(cfg)
+        CapsuleNotificationListener.refreshSnapshot(force = true)
+        CapsulePublisher.refreshCurrent(ctx, cfg)
         setStatus("已刷新通知列表与灵动胶囊")
     }
 
     fun stopCapsule() {
         val ctx = getApplication<Application>()
         CapsuleNotificationListener.pinNotification(null, null)
+        CapsulePublisher.dismiss(ctx, reason = "已手动停止灵动胶囊")
         val intent = Intent(ctx, CapsuleKeepAliveService::class.java)
             .setAction(CapsuleKeepAliveService.ACTION_STOP)
-        ctx.startService(intent)
-        setStatus("已停止灵动胶囊服务")
+        runCatching { ctx.startService(intent) }
+        recheckAllPermissions()
+        setStatus("已停止灵动胶囊服务并恢复系统横幅")
     }
 
     fun setStatus(msg: String) {

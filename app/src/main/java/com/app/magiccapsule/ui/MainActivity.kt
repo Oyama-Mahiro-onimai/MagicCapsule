@@ -57,12 +57,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -74,6 +77,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.app.magiccapsule.R
 import com.app.magiccapsule.model.CapsuleConfig
+import com.app.magiccapsule.service.CapsuleNotificationListener
 import com.app.magiccapsule.model.CapturedNotification
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -105,6 +109,14 @@ fun CapsuleAppRoot(vm: CapsuleViewModel = viewModel()) {
     val state by vm.uiState.collectAsState()
     val notifications by vm.capturedNotifications.collectAsState()
     val listenerConnected by vm.listenerConnected.collectAsState()
+    val overlayConnected by vm.overlayConnected.collectAsState()
+    val overlayStatus by vm.overlayStatus.collectAsState()
+    val capsuleStatus by vm.capsuleStatus.collectAsState()
+    val lastInterceptedSummary by vm.lastInterceptedSummary.collectAsState()
+    val shizukuAlive by vm.shizukuAlive.collectAsState()
+    val shizukuGranted by vm.shizukuGranted.collectAsState()
+    val shizukuStatus by vm.shizukuStatus.collectAsState()
+    val clipboardManager = LocalClipboardManager.current
     val pinnedKey by vm.pinnedKey.collectAsState()
     val activeSourcePackage by vm.activeSourcePackage.collectAsState()
     val installedApps by vm.installedApps.collectAsState()
@@ -126,8 +138,11 @@ fun CapsuleAppRoot(vm: CapsuleViewModel = viewModel()) {
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                vm.recheckNotificationAccess()
+            when (event) {
+                Lifecycle.Event.ON_START -> CapsuleNotificationListener.setUiVisible(true)
+                Lifecycle.Event.ON_RESUME -> vm.recheckAllPermissions()
+                Lifecycle.Event.ON_STOP -> CapsuleNotificationListener.setUiVisible(false)
+                else -> Unit
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -148,6 +163,14 @@ fun CapsuleAppRoot(vm: CapsuleViewModel = viewModel()) {
             notifPermLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
         } else {
             action()
+        }
+    }
+
+    fun openAccessibilitySettings() {
+        runCatching {
+            context.startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+        }.onFailure {
+            vm.setStatus("请前往：设置 → 辅助功能 → 无障碍 → 已下载的服务 → 开启「灵动胶囊顶层横幅」")
         }
     }
 
@@ -178,15 +201,18 @@ fun CapsuleAppRoot(vm: CapsuleViewModel = viewModel()) {
 
     val topBarTitle = when (activeSubPage) {
         null -> when (currentTab) {
-            MainTab.HOME -> "灵动胶囊助手 v18"
+            MainTab.HOME -> "灵动胶囊助手 v40-beta"
             MainTab.NOTIFICATIONS -> "通知与白名单"
             MainTab.APPEARANCE -> "卡片外观定制"
             MainTab.SETTINGS -> "系统与高级设置"
         }
         SubPage.WhitelistManager -> "应用列表白名单"
+        SubPage.BannerHijackSettings -> "顶层横幅接管设置"
         SubPage.ColorEditor -> "颜色高度自定义"
         SubPage.TypographyEditor -> "文字 sp 字号调节"
         SubPage.ManualConfig -> "手动文案与模板"
+        SubPage.CrashLogViewer -> "崩溃日志（隐藏调试）"
+        SubPage.RuntimeLogViewer -> "运行与调试日志"
         is SubPage.NotificationDetail -> "通知来源详情"
     }
 
@@ -249,6 +275,33 @@ fun CapsuleAppRoot(vm: CapsuleViewModel = viewModel()) {
                         onClearWhitelist = { vm.clearWhitelist() }
                     )
                 }
+                SubPage.BannerHijackSettings -> {
+                    BannerHijackSettingsPage(
+                        state = state,
+                        overlayConnected = overlayConnected,
+                        overlayStatus = overlayStatus,
+                        capsuleStatus = capsuleStatus,
+                        lastInterceptedSummary = lastInterceptedSummary,
+                        shizukuAlive = shizukuAlive,
+                        shizukuGranted = shizukuGranted,
+                        shizukuStatus = shizukuStatus,
+                        onRequestShizuku = { vm.requestShizukuAndGrant() },
+                        onOpenAccessibilitySettings = { openAccessibilitySettings() },
+                        onCopyAdbCommand = {
+                            clipboardManager.setText(
+                                AnnotatedString("adb shell pm grant com.app.magiccapsule android.permission.WRITE_SECURE_SETTINGS")
+                            )
+                            vm.setStatus("已复制 ADB 授权命令到剪贴板")
+                        },
+                        onToggleBanner = { en, sup -> vm.updateOverlayBannerConfig(en, sup) },
+                        onDurationChange = { sec ->
+                            vm.updateConfig(saveImmediately = false) { it.copy(overlayBannerDurationSec = sec) }
+                        },
+                        onUpdateConfig = { saveNow, transform -> vm.updateConfig(saveNow, transform) },
+                        onTestBanner = { vm.testOverlayBanner() },
+                        onRestoreSystemHeadsUp = { vm.restoreSystemHeadsUp() }
+                    )
+                }
                 SubPage.ColorEditor -> {
                     ColorEditorPage(
                         config = config,
@@ -262,6 +315,12 @@ fun CapsuleAppRoot(vm: CapsuleViewModel = viewModel()) {
                         onUpdateConfig = { saveNow, transform -> vm.updateConfig(saveNow, transform) },
                         onApply = { runWithNotifPermission { vm.refreshAll() } }
                     )
+                }
+                SubPage.RuntimeLogViewer -> {
+                    RuntimeLogViewerPage(onStatusMessage = { vm.setStatus(it) })
+                }
+                SubPage.CrashLogViewer -> {
+                    CrashLogViewerPage(onStatusMessage = { vm.setStatus(it) })
                 }
                 SubPage.ManualConfig -> {
                     ManualConfigPage(
@@ -314,7 +373,9 @@ fun CapsuleAppRoot(vm: CapsuleViewModel = viewModel()) {
                             },
                             onUnpin = { vm.unpinNotification() },
                             onRefresh = { vm.refreshAll() },
+                            overlayConnected = overlayConnected,
                             onOpenWhitelistPage = { activeSubPage = SubPage.WhitelistManager },
+                            onOpenBannerHijackPage = { activeSubPage = SubPage.BannerHijackSettings },
                             onOpenNotificationDetail = { key -> activeSubPage = SubPage.NotificationDetail(key) }
                         )
                         MainTab.APPEARANCE -> AppearanceTabContent(
@@ -331,6 +392,8 @@ fun CapsuleAppRoot(vm: CapsuleViewModel = viewModel()) {
                             statusMessage = state.statusMessage,
                             onUpdateConfig = { saveNow, transform -> vm.updateConfig(saveNow, transform) },
                             onOpenManualConfig = { activeSubPage = SubPage.ManualConfig },
+                            onOpenCrashLog = { activeSubPage = SubPage.CrashLogViewer },
+                            onOpenRuntimeLog = { activeSubPage = SubPage.RuntimeLogViewer },
                             onOpenNotifSettings = { openNotificationAccessSettings() },
                             onRequestIgnoreBatteryOpt = { requestIgnoreBatteryOpt() },
                             onStopCapsule = { vm.stopCapsule() }
@@ -409,6 +472,12 @@ private fun HomeTabContent(
                     tint = MaterialTheme.colorScheme.primary,
                     textColor = MaterialTheme.colorScheme.primary
                 )
+                StatusIconRow(
+                    iconRes = R.drawable.ic_px_tune,
+                    text = "获取方式：${CapsuleConfig.acquireModeLabel(config.capsuleAcquireMode)} · ${CapsuleConfig.deliveryModeLabel(config.capsuleDeliveryMode)}",
+                    tint = MaterialTheme.colorScheme.secondary,
+                    textColor = MaterialTheme.colorScheme.onSurfaceVariant
+                )
                 if (!state.hasNotificationAccess) {
                     OutlinedButton(
                         onClick = onOpenNotifSettings,
@@ -462,6 +531,15 @@ private fun HomeTabContent(
         Text("快捷二级页面", style = MaterialTheme.typography.labelLarge)
         SectionEntryCard(
             iconRes = R.drawable.ic_px_shield,
+            title = "顶层横幅接管 (Overlay)",
+            subtitle = "无障碍顶层覆盖横幅 + 可选 ADB 屏蔽重复系统横幅",
+            badge = if (config.enableOverlayBanner) "已启用" else "未启用",
+            iconContainerColor = MaterialTheme.colorScheme.secondaryContainer,
+            iconContentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            onClick = { onOpenSubPage(SubPage.BannerHijackSettings) }
+        )
+        SectionEntryCard(
+            iconRes = R.drawable.ic_px_shield,
             title = "应用列表白名单",
             subtitle = "管理免刷新频率限制的应用（已读取 $installedCount 个应用）",
             badge = "${config.autoWhitelistPackages.size} 个",
@@ -506,7 +584,9 @@ private fun NotificationsTabContent(
     onPinOrUnpin: (CapturedNotification, Boolean) -> Unit,
     onUnpin: () -> Unit,
     onRefresh: () -> Unit,
+    overlayConnected: Boolean,
     onOpenWhitelistPage: () -> Unit,
+    onOpenBannerHijackPage: () -> Unit,
     onOpenNotificationDetail: (String) -> Unit
 ) {
     Column(
@@ -517,6 +597,15 @@ private fun NotificationsTabContent(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        SectionEntryCard(
+            iconRes = R.drawable.ic_px_apps,
+            title = "顶层横幅接管（显示在系统横幅之上）",
+            subtitle = if (overlayConnected) "无障碍置顶层已就绪，支持屏蔽重复原生横幅" else "点此开启无障碍置顶层与 ADB 屏蔽系统横幅",
+            badge = if (config.enableOverlayBanner && overlayConnected) "运行中" else "去设置",
+            iconContainerColor = MaterialTheme.colorScheme.tertiaryContainer,
+            iconContentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+            onClick = onOpenBannerHijackPage
+        )
         SectionEntryCard(
             iconRes = R.drawable.ic_px_apps,
             title = "应用列表白名单（免限频）",
@@ -548,6 +637,113 @@ private fun NotificationsTabContent(
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                StatusIconRow(
+                    iconRes = R.drawable.ic_px_tune,
+                    text = "胶囊通知获取与推送方式（可按机型自由切换）",
+                    tint = MaterialTheme.colorScheme.primary
+                )
+
+                Text("1. 通知获取来源", style = MaterialTheme.typography.labelMedium)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    CapsuleConfig.ALL_ACQUIRE_MODES.forEach { (modeKey, modeLabel) ->
+                        FilterChip(
+                            selected = config.capsuleAcquireMode == modeKey,
+                            onClick = {
+                                onUpdateConfig(true) { cfg ->
+                                    cfg.copy(
+                                        capsuleAcquireMode = modeKey,
+                                        autoMirrorNotifications = modeKey != CapsuleConfig.ACQUIRE_MANUAL_PIN_ONLY
+                                    )
+                                }
+                            },
+                            label = { Text(modeLabel) }
+                        )
+                    }
+                }
+                Text(
+                    text = CapsuleConfig.acquireModeDesc(config.capsuleAcquireMode),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Text("2. 胶囊拉起与渠道方式", style = MaterialTheme.typography.labelMedium)
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    CapsuleConfig.ALL_DELIVERY_MODES.forEach { (deliveryKey, deliveryLabel) ->
+                        FilterChip(
+                            selected = config.capsuleDeliveryMode == deliveryKey,
+                            onClick = {
+                                onUpdateConfig(true) { cfg ->
+                                    cfg.copy(capsuleDeliveryMode = deliveryKey)
+                                }
+                            },
+                            label = { Text(deliveryLabel) }
+                        )
+                    }
+                }
+                Text(
+                    text = CapsuleConfig.deliveryModeDesc(config.capsuleDeliveryMode),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("有通知时套用横幅样式并替换文案与图标", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            text = "来信时沿用横幅底色与文字配色，并替换手动文案和图标",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = config.capsuleFollowBannerStyle,
+                        onCheckedChange = { c ->
+                            onUpdateConfig(true) { it.copy(capsuleFollowBannerStyle = c) }
+                        }
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("开启横幅时胶囊走静默通道（防下方重复同名通知）", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            text = "避免胶囊自身弹出系统横幅叠加在自定义横幅下方（若状态栏胶囊不显示可关闭）",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = config.capsuleQuietChannelWhenBannerOn,
+                        onCheckedChange = { c ->
+                            onUpdateConfig(true) { it.copy(capsuleQuietChannelWhenBannerOn = c) }
+                        }
+                    )
+                }
+            }
+        }
+
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(14.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Row(
@@ -557,8 +753,123 @@ private fun NotificationsTabContent(
                 ) {
                     Text("未锁定时自动同步新通知", style = MaterialTheme.typography.bodyMedium)
                     Switch(
-                        checked = config.autoMirrorNotifications,
-                        onCheckedChange = { c -> onUpdateConfig(true) { it.copy(autoMirrorNotifications = c) } }
+                        checked = config.autoMirrorNotifications && config.capsuleAcquireMode != CapsuleConfig.ACQUIRE_MANUAL_PIN_ONLY,
+                        onCheckedChange = { c ->
+                            onUpdateConfig(true) { cfg ->
+                                val nextAcquire = when {
+                                    !c -> CapsuleConfig.ACQUIRE_MANUAL_PIN_ONLY
+                                    cfg.capsuleAcquireMode == CapsuleConfig.ACQUIRE_MANUAL_PIN_ONLY -> CapsuleConfig.ACQUIRE_UNIFIED_BANNER
+                                    else -> cfg.capsuleAcquireMode
+                                }
+                                cfg.copy(
+                                    autoMirrorNotifications = c,
+                                    capsuleAcquireMode = nextAcquire
+                                )
+                            }
+                        }
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("胶囊即弹出即销毁（复用横幅链路）", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            text = "新通知弹出胶囊并在保持时间后自动销毁（手动锁定保持常驻）",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = config.capsuleAutoDismiss,
+                        onCheckedChange = { c -> onUpdateConfig(true) { it.copy(capsuleAutoDismiss = c) } }
+                    )
+                }
+                if (config.capsuleAutoDismiss) {
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = "胶囊保持时间：${config.capsuleHoldDurationSec} 秒",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                OutlinedButton(
+                                    onClick = {
+                                        onUpdateConfig(true) {
+                                            it.copy(capsuleHoldDurationSec = (it.capsuleHoldDurationSec - 1).coerceIn(2, 60))
+                                        }
+                                    }
+                                ) { Text("-1s") }
+                                OutlinedButton(
+                                    onClick = {
+                                        onUpdateConfig(true) {
+                                            it.copy(capsuleHoldDurationSec = (it.capsuleHoldDurationSec + 1).coerceIn(2, 60))
+                                        }
+                                    }
+                                ) { Text("+1s") }
+                            }
+                        }
+                        Slider(
+                            value = config.capsuleHoldDurationSec.toFloat(),
+                            onValueChange = { v ->
+                                onUpdateConfig(false) {
+                                    it.copy(capsuleHoldDurationSec = v.roundToInt().coerceIn(2, 60))
+                                }
+                            },
+                            onValueChangeFinished = { onUpdateConfig(true) { it } },
+                            valueRange = 2f..60f
+                        )
+                    }
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("按系统通知渠道划分重要性（过滤静默通知）", style = MaterialTheme.typography.labelMedium)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        CapsuleConfig.ALL_IMPORTANCE_LEVELS.forEach { (lvl, lvlLabel) ->
+                            FilterChip(
+                                selected = config.minChannelImportance == lvl,
+                                onClick = {
+                                    onUpdateConfig(true) { it.copy(minChannelImportance = lvl) }
+                                },
+                                label = { Text(lvlLabel) }
+                            )
+                        }
+                    }
+                    Text(
+                        text = CapsuleConfig.importanceFilterDesc(config.minChannelImportance),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("微信/QQ来电自动拉起通话界面", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            text = "来电通知强制豁免常驻/静默过滤；开启屏蔽系统横幅时自动拉起通话页防止无法接听",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = config.autoLaunchCallFullScreen,
+                        onCheckedChange = { c ->
+                            onUpdateConfig(true) { it.copy(autoLaunchCallFullScreen = c) }
+                        }
                     )
                 }
                 Row(
@@ -592,10 +903,11 @@ private fun NotificationsTabContent(
                     Slider(
                         value = config.autoThrottleIntervalSec.toFloat(),
                         onValueChange = { v ->
-                            onUpdateConfig(true) {
+                            onUpdateConfig(false) {
                                 it.copy(autoThrottleIntervalSec = v.roundToInt().coerceIn(1, 60))
                             }
                         },
+                        onValueChangeFinished = { onUpdateConfig(true) { it } },
                         valueRange = 1f..60f
                     )
                 }
@@ -694,6 +1006,7 @@ private fun NotificationsTabContent(
                                     )
                                 }
                                 val prefix = buildString {
+                                    append("[${item.importanceLabel()}] ")
                                     if (isWhitelisted) append("[白名单] ")
                                     if (item.isOngoing) append("[常驻] ")
                                 }
@@ -718,6 +1031,34 @@ private fun NotificationsTabContent(
                             maxLines = 2,
                             overflow = TextOverflow.Ellipsis
                         )
+                        if (item.channelName.isNotBlank()) {
+                            Text(
+                                text = "系统渠道：${item.channelName}（重要性 ${item.importance} · ${item.importanceLabel()}）",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        if (item.actionTitles.isNotEmpty()) {
+                            val listCtx = LocalContext.current
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .horizontalScroll(rememberScrollState()),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                item.actionTitles.forEachIndexed { idx, actLabel ->
+                                    OutlinedButton(
+                                        onClick = {
+                                            CapsuleNotificationListener.triggerActionFromList(listCtx, item.key, idx)
+                                        }
+                                    ) {
+                                        Text(actLabel, maxLines = 1)
+                                    }
+                                }
+                            }
+                        }
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -825,8 +1166,8 @@ private fun AppearanceTabContent(
         SectionEntryCard(
             iconRes = R.drawable.ic_px_palette,
             title = "颜色高度自定义",
-            subtitle = "独立设置底色、标题色、副文色、按钮底色与前景色",
-            badge = config.cardBgHex,
+            subtitle = "2D 调色板、背景不透明度 (${config.cardBgAlphaPercent}%) 与灰度 (${config.cardBgGrayscalePercent}%)",
+            badge = "${config.cardBgAlphaPercent}%",
             iconContainerColor = MaterialTheme.colorScheme.tertiaryContainer,
             iconContentColor = MaterialTheme.colorScheme.onTertiaryContainer,
             onClick = onOpenColorEditor
@@ -879,6 +1220,102 @@ private fun AppearanceTabContent(
                         onCheckedChange = { c -> onUpdateConfig(true) { it.copy(showActions = c) } }
                     )
                 }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                        Text("渲染本应用自带按钮（打开/关闭 · 刷新/停止）", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            text = "关闭后仅显示原通知透传出的真实按钮；点击通知本体或透传按钮直接跳转",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = config.renderOwnNotificationButtons,
+                        onCheckedChange = { c -> onUpdateConfig(true) { it.copy(renderOwnNotificationButtons = c) } }
+                    )
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "横幅通知按钮大小：${config.bannerBtnSizeDp} dp",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    onUpdateConfig(true) {
+                                        it.copy(bannerBtnSizeDp = (it.bannerBtnSizeDp - 2).coerceIn(26, 56))
+                                    }
+                                }
+                            ) { Text("-2dp") }
+                            OutlinedButton(
+                                onClick = {
+                                    onUpdateConfig(true) {
+                                        it.copy(bannerBtnSizeDp = (it.bannerBtnSizeDp + 2).coerceIn(26, 56))
+                                    }
+                                }
+                            ) { Text("+2dp") }
+                        }
+                    }
+                    Slider(
+                        value = config.bannerBtnSizeDp.toFloat(),
+                        onValueChange = { v ->
+                            onUpdateConfig(false) {
+                                it.copy(bannerBtnSizeDp = v.roundToInt().coerceIn(26, 56))
+                            }
+                        },
+                        onValueChangeFinished = { onUpdateConfig(true) { it } },
+                        valueRange = 26f..56f
+                    )
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "胶囊卡片按钮大小：${config.capsuleBtnSizeDp} dp",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    onUpdateConfig(true) {
+                                        it.copy(capsuleBtnSizeDp = (it.capsuleBtnSizeDp - 2).coerceIn(24, 48))
+                                    }
+                                }
+                            ) { Text("-2dp") }
+                            OutlinedButton(
+                                onClick = {
+                                    onUpdateConfig(true) {
+                                        it.copy(capsuleBtnSizeDp = (it.capsuleBtnSizeDp + 2).coerceIn(24, 48))
+                                    }
+                                }
+                            ) { Text("+2dp") }
+                        }
+                    }
+                    Slider(
+                        value = config.capsuleBtnSizeDp.toFloat(),
+                        onValueChange = { v ->
+                            onUpdateConfig(false) {
+                                it.copy(capsuleBtnSizeDp = v.roundToInt().coerceIn(24, 48))
+                            }
+                        },
+                        onValueChangeFinished = { onUpdateConfig(true) { it } },
+                        valueRange = 24f..48f
+                    )
+                }
             }
         }
 
@@ -907,6 +1344,8 @@ private fun SettingsTabContent(
     statusMessage: String,
     onUpdateConfig: (Boolean, (CapsuleConfig) -> CapsuleConfig) -> Unit,
     onOpenManualConfig: () -> Unit,
+    onOpenCrashLog: () -> Unit,
+    onOpenRuntimeLog: () -> Unit,
     onOpenNotifSettings: () -> Unit,
     onRequestIgnoreBatteryOpt: () -> Unit,
     onStopCapsule: () -> Unit
@@ -919,6 +1358,16 @@ private fun SettingsTabContent(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        SectionEntryCard(
+            iconRes = R.drawable.ic_px_info,
+            title = "运行与调试日志（测试排障）",
+            subtitle = "按通知监听、灵动胶囊、顶层横幅和错误实时筛选查看运行轨迹",
+            badge = "日志",
+            iconContainerColor = MaterialTheme.colorScheme.secondaryContainer,
+            iconContentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+            onClick = onOpenRuntimeLog
+        )
+
         SectionEntryCard(
             iconRes = R.drawable.ic_px_edit_note,
             title = "手动自定义文案与胶囊模板",
@@ -941,10 +1390,11 @@ private fun SettingsTabContent(
                 Slider(
                     value = config.refreshIntervalSec.toFloat(),
                     onValueChange = { v ->
-                        onUpdateConfig(true) {
+                        onUpdateConfig(false) {
                             it.copy(refreshIntervalSec = v.roundToInt().coerceIn(10, 300))
                         }
                     },
+                    onValueChangeFinished = { onUpdateConfig(true) { it } },
                     valueRange = 10f..300f
                 )
             }
@@ -979,7 +1429,28 @@ private fun SettingsTabContent(
             Text("停止灵动胶囊前台服务")
         }
 
-        Card(modifier = Modifier.fillMaxWidth()) {
+        var secretTapCount by remember { mutableIntStateOf(0) }
+        val crashEntryUnlocked = secretTapCount >= 5
+
+        if (crashEntryUnlocked) {
+            SectionEntryCard(
+                iconRes = R.drawable.ic_px_info,
+                title = "崩溃日志（隐藏入口）",
+                subtitle = "查看本地 crash_log.txt 完整崩溃堆栈与胶囊现场状态",
+                badge = "调试",
+                iconContainerColor = MaterialTheme.colorScheme.errorContainer,
+                iconContentColor = MaterialTheme.colorScheme.onErrorContainer,
+                onClick = onOpenCrashLog
+            )
+        }
+
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable {
+                    if (secretTapCount < 5) secretTapCount++
+                }
+        ) {
             Column(
                 modifier = Modifier.padding(14.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp)
@@ -994,7 +1465,7 @@ private fun SettingsTabContent(
                         iconSizeDp = 18
                     )
                     Column {
-                        Text("灵动胶囊助手 v18.0.0", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                        Text("灵动胶囊助手 v40.0.0-beta", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                         Text(
                             text = "Pixel Material Symbols Rounded 图标风格",
                             style = MaterialTheme.typography.labelSmall,

@@ -16,8 +16,11 @@ enum class MainTab(
 
 sealed interface SubPage {
     data object WhitelistManager : SubPage
+    data object BannerHijackSettings : SubPage
     data object ColorEditor : SubPage
     data object TypographyEditor : SubPage
     data object ManualConfig : SubPage
+    data object CrashLogViewer : SubPage
+    data object RuntimeLogViewer : SubPage
     data class NotificationDetail(val key: String) : SubPage
 }

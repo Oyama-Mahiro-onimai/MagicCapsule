@@ -8,10 +8,18 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import com.app.magiccapsule.capsule.CapsuleNotificationFactory
+import com.app.magiccapsule.crash.GlobalCrashHandler
 import com.app.magiccapsule.data.CapsulePrefs
 import com.app.magiccapsule.model.CapsuleConfig
 
+/**
+ * 省电事件驱动版胶囊保活服务：
+ * - 息屏时（!powerManager.isInteractive）彻底暂停定时重绘与跨进程 IPC
+ * - 仅在开启「显示刷新时间」或「计时器」时启用定时刷新；默认静态/镜像模式下完全事件驱动，零无意义轮询耗电
+ * - 直接复用 NotificationIconStore.currentActivePayload 的真实通知图标与交互按钮
+ */
 class CapsuleKeepAliveService : Service() {
 
     companion object {
@@ -19,49 +27,103 @@ class CapsuleKeepAliveService : Service() {
         const val ACTION_REFRESH = "com.app.magiccapsule.ACTION_REFRESH"
         const val ACTION_MIRROR_NOTIFICATION = "com.app.magiccapsule.ACTION_MIRROR_NOTIFICATION"
         const val ACTION_STOP = "com.app.magiccapsule.ACTION_STOP"
+        const val ACTION_DISMISS_CAPSULE = "com.app.magiccapsule.ACTION_DISMISS_CAPSULE"
 
         const val EXTRA_PACKAGE_NAME = "extra_package_name"
         const val EXTRA_APP_NAME = "extra_app_name"
         const val EXTRA_TITLE = "extra_title"
         const val EXTRA_TEXT = "extra_text"
         const val EXTRA_IS_WHITELISTED = "extra_is_whitelisted"
+        const val EXTRA_IS_PINNED = "extra_is_pinned"
     }
 
     private lateinit var prefs: CapsulePrefs
+    private lateinit var powerManager: PowerManager
     private val handler = Handler(Looper.getMainLooper())
     private var config = CapsuleConfig()
     private var refreshCount = 0
     private var isForegroundStarted = false
 
-    // 记录当前正在镜像的通知来源，刷新样式时不丢失当前通知内容并防止自身包名冲突
     private var isMirroringActive = false
+    private var isPinnedMirror = false
     private var mirroredPackageName: String? = null
     private var mirroredAppName: String = ""
     private var mirroredTitle: String = ""
     private var mirroredText: String = ""
 
-    private val keepAliveTask = object : Runnable {
+    private val autoDismissCapsuleTask: Runnable = Runnable {
+        handler.removeCallbacks(keepAliveTask)
+        handler.removeCallbacks(autoDismissCapsuleTask)
+        isForegroundStarted = false
+        isMirroringActive = false
+        isPinnedMirror = false
+        mirroredPackageName = null
+        NotificationIconStore.currentActivePayload = null
+        CapsuleNotificationListener.clearActiveSource()
+        CapsuleNotificationFactory.releaseMediaSession()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private val keepAliveTask: Runnable = object : Runnable {
         override fun run() {
-            refreshCount++
-            CapsuleNotificationListener.refreshSnapshot()
-            publish(startFg = !isForegroundStarted)
-            handler.postDelayed(this, config.refreshIntervalSec * 1000L)
+            // 省电：仅在亮屏且确实需要刷新时间戳或计时器时才执行定时重绘
+            if (powerManager.isInteractive && needsPeriodicTick(config)) {
+                refreshCount++
+                publish(startFg = !isForegroundStarted)
+            }
+            if (needsPeriodicTick(config)) {
+                handler.postDelayed(this, config.refreshIntervalSec.coerceAtLeast(15) * 1000L)
+            }
+        }
+    }
+
+    private fun needsPeriodicTick(cfg: CapsuleConfig): Boolean =
+        cfg.showTimestamp || cfg.enableTimer || cfg.template.contains("timer")
+
+    private fun rescheduleIfNeeded() {
+        handler.removeCallbacks(keepAliveTask)
+        handler.removeCallbacks(autoDismissCapsuleTask)
+        if (needsPeriodicTick(config)) {
+            handler.postDelayed(keepAliveTask, config.refreshIntervalSec.coerceAtLeast(15) * 1000L)
         }
     }
 
     override fun onCreate() {
         super.onCreate()
+        GlobalCrashHandler.install(this)
         prefs = CapsulePrefs(this)
+        powerManager = getSystemService(PowerManager::class.java)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_STOP -> {
+            ACTION_DISMISS_CAPSULE -> {
                 handler.removeCallbacks(keepAliveTask)
+                handler.removeCallbacks(autoDismissCapsuleTask)
                 isForegroundStarted = false
                 isMirroringActive = false
+                isPinnedMirror = false
                 mirroredPackageName = null
+                NotificationIconStore.currentActivePayload = null
                 CapsuleNotificationListener.clearActiveSource()
+                CapsuleNotificationFactory.releaseMediaSession()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return START_NOT_STICKY
+            }
+            ACTION_STOP -> {
+                handler.removeCallbacks(keepAliveTask)
+                handler.removeCallbacks(autoDismissCapsuleTask)
+                isForegroundStarted = false
+                isMirroringActive = false
+                isPinnedMirror = false
+                mirroredPackageName = null
+                NotificationIconStore.currentActivePayload = null
+                CapsuleNotificationListener.clearActiveSource()
+                CapsuleOverlayAccessibilityService.dismissBanner()
+                SystemHeadsUpController.restoreDefault(this)
+                CapsuleNotificationFactory.releaseMediaSession()
                 stopForeground(STOP_FOREGROUND_REMOVE)
                 stopSelf()
                 return START_NOT_STICKY
@@ -78,13 +140,12 @@ class CapsuleKeepAliveService : Service() {
                     base
                 }
                 refreshCount++
-                CapsuleNotificationListener.refreshSnapshot()
                 publish(startFg = !isForegroundStarted)
+                rescheduleIfNeeded()
                 return START_STICKY
             }
             ACTION_MIRROR_NOTIFICATION -> {
                 val srcPkg = intent.getStringExtra(EXTRA_PACKAGE_NAME).orEmpty()
-                // 防冲突：拒绝本应用自身包名镜像
                 if (srcPkg == packageName) return START_STICKY
 
                 val base = prefs.load()
@@ -93,6 +154,7 @@ class CapsuleKeepAliveService : Service() {
                 val text = intent.getStringExtra(EXTRA_TEXT).orEmpty().ifBlank { title }
 
                 isMirroringActive = true
+                isPinnedMirror = intent.getBooleanExtra(EXTRA_IS_PINNED, false)
                 mirroredPackageName = srcPkg.ifBlank { null }
                 mirroredAppName = appName
                 mirroredTitle = title
@@ -105,26 +167,34 @@ class CapsuleKeepAliveService : Service() {
                 )
                 refreshCount++
                 publish(startFg = !isForegroundStarted)
-                handler.removeCallbacks(keepAliveTask)
-                handler.postDelayed(keepAliveTask, config.refreshIntervalSec * 1000L)
+                rescheduleIfNeeded()
+                // 即弹出即销毁：自动模式且开启自动销毁时，到达保持时间后自动撤下胶囊并结束服务
+                handler.removeCallbacks(autoDismissCapsuleTask)
+                if (!isPinnedMirror && config.capsuleAutoDismiss) {
+                    val holdMs = config.capsuleHoldDurationSec.coerceIn(2, 60) * 1000L
+                    handler.postDelayed(autoDismissCapsuleTask, holdMs)
+                }
                 return START_STICKY
             }
             else -> {
+                handler.removeCallbacks(autoDismissCapsuleTask)
                 isMirroringActive = false
+                isPinnedMirror = false
                 mirroredPackageName = null
+                NotificationIconStore.currentActivePayload = null
                 CapsuleNotificationListener.clearActiveSource()
                 config = prefs.load()
                 refreshCount = 1
                 publish(startFg = true)
-                handler.removeCallbacks(keepAliveTask)
-                handler.postDelayed(keepAliveTask, config.refreshIntervalSec * 1000L)
+                rescheduleIfNeeded()
                 return START_STICKY
             }
         }
     }
 
     private fun publish(startFg: Boolean) {
-        val notification = CapsuleNotificationFactory.create(this, config, refreshCount)
+        val payload = if (isMirroringActive) NotificationIconStore.currentActivePayload else null
+        val notification = CapsuleNotificationFactory.create(this, config, refreshCount, payload)
         if (startFg) {
             isForegroundStarted = true
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
@@ -144,6 +214,7 @@ class CapsuleKeepAliveService : Service() {
 
     override fun onDestroy() {
         handler.removeCallbacks(keepAliveTask)
+        handler.removeCallbacks(autoDismissCapsuleTask)
         super.onDestroy()
     }
 

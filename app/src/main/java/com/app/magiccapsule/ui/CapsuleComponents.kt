@@ -2,9 +2,12 @@ package com.app.magiccapsule.ui
 
 import android.graphics.Color as AndroidColor
 import androidx.annotation.DrawableRes
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,10 +31,19 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -203,15 +215,176 @@ fun SpSizeControl(
     }
 }
 
+/**
+ * 交互式 2D HSV 调色板 + 色相/饱和度/亮度滑块 + 快速色块 + #AARRGGBB 输入
+ */
 @Composable
-fun ColorPickerField(
+fun InteractiveColorBoard(
     label: String,
     hexValue: String,
     fallbackColor: Int,
     onHexChange: (String) -> Unit
 ) {
-    val parsedColor = Color(CapsuleConfig.parseColorSafe(hexValue, fallbackColor))
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    val parsedInt = CapsuleConfig.parseColorSafe(hexValue, fallbackColor)
+    val initialHsv = remember(parsedInt) {
+        FloatArray(3).also { AndroidColor.colorToHSV(parsedInt, it) }
+    }
+    var hue by remember { mutableFloatStateOf(initialHsv[0]) }
+    var sat by remember { mutableFloatStateOf(initialHsv[1]) }
+    var value by remember { mutableFloatStateOf(initialHsv[2]) }
+
+    // 外部切换编辑目标或点击预设色块时同步 HSV
+    LaunchedEffect(hexValue) {
+        val c = CapsuleConfig.parseColorSafe(hexValue, fallbackColor)
+        val hsv = FloatArray(3)
+        AndroidColor.colorToHSV(c, hsv)
+        if (hsv[1] > 0.01f) hue = hsv[0]
+        sat = hsv[1]
+        value = hsv[2]
+    }
+
+    fun emitColor(h: Float, s: Float, v: Float) {
+        val argb = AndroidColor.HSVToColor(255, floatArrayOf(h, s, v))
+        onHexChange(CapsuleConfig.toArgbHex(argb))
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        // 2D 饱和度 × 亮度调色板
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(168.dp)
+                .clip(RoundedCornerShape(16.dp))
+                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(16.dp))
+        ) {
+            Canvas(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(168.dp)
+                    .pointerInput(hue) {
+                        detectTapGestures { offset ->
+                            val newS = (offset.x / size.width).coerceIn(0f, 1f)
+                            val newV = (1f - offset.y / size.height).coerceIn(0f, 1f)
+                            sat = newS
+                            value = newV
+                            emitColor(hue, newS, newV)
+                        }
+                    }
+                    .pointerInput(hue) {
+                        detectDragGestures { change, _ ->
+                            change.consume()
+                            val newS = (change.position.x / size.width).coerceIn(0f, 1f)
+                            val newV = (1f - change.position.y / size.height).coerceIn(0f, 1f)
+                            sat = newS
+                            value = newV
+                            emitColor(hue, newS, newV)
+                        }
+                    }
+            ) {
+                val hueColor = Color.hsv(hue.coerceIn(0f, 360f), 1f, 1f)
+                drawRect(
+                    brush = Brush.horizontalGradient(listOf(Color.White, hueColor))
+                )
+                drawRect(
+                    brush = Brush.verticalGradient(listOf(Color.Transparent, Color.Black))
+                )
+                val cx = sat.coerceIn(0f, 1f) * size.width
+                val cy = (1f - value.coerceIn(0f, 1f)) * size.height
+                drawCircle(
+                    color = Color.Black.copy(alpha = 0.45f),
+                    radius = 11.dp.toPx(),
+                    center = Offset(cx, cy),
+                    style = Stroke(width = 3.dp.toPx())
+                )
+                drawCircle(
+                    color = Color.White,
+                    radius = 9.dp.toPx(),
+                    center = Offset(cx, cy),
+                    style = Stroke(width = 2.5.dp.toPx())
+                )
+            }
+        }
+
+        // 彩虹色相滑块
+        Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            Text(
+                text = "色相 (H)：${hue.roundToInt()}°",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            Box(
+                modifier = Modifier.fillMaxWidth(),
+                contentAlignment = Alignment.Center
+            ) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(12.dp)
+                        .clip(RoundedCornerShape(6.dp))
+                        .background(
+                            Brush.horizontalGradient(
+                                listOf(
+                                    Color.Red,
+                                    Color.Yellow,
+                                    Color.Green,
+                                    Color.Cyan,
+                                    Color.Blue,
+                                    Color.Magenta,
+                                    Color.Red
+                                )
+                            )
+                        )
+                )
+                Slider(
+                    value = hue,
+                    onValueChange = {
+                        hue = it
+                        emitColor(it, sat, value)
+                    },
+                    valueRange = 0f..360f,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+
+        // 饱和度 & 明度滑块
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "饱和度：${(sat * 100).roundToInt()}%",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Slider(
+                    value = sat,
+                    onValueChange = {
+                        sat = it
+                        emitColor(hue, it, value)
+                    },
+                    valueRange = 0f..1f
+                )
+            }
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = "亮度：${(value * 100).roundToInt()}%",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Slider(
+                    value = value,
+                    onValueChange = {
+                        value = it
+                        emitColor(hue, sat, it)
+                    },
+                    valueRange = 0f..1f
+                )
+            }
+        }
+
+        // 色号输入与预览圆点
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -219,19 +392,21 @@ fun ColorPickerField(
         ) {
             Box(
                 modifier = Modifier
-                    .size(28.dp)
+                    .size(32.dp)
                     .clip(CircleShape)
-                    .background(parsedColor)
+                    .background(Color(parsedInt))
                     .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape)
             )
             OutlinedTextField(
                 value = hexValue,
                 onValueChange = onHexChange,
-                label = { Text(label) },
+                label = { Text("$label (#AARRGGBB)") },
                 singleLine = true,
                 modifier = Modifier.weight(1f)
             )
         }
+
+        // 快速色块
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -243,7 +418,7 @@ fun ColorPickerField(
                 val isCurrent = hexValue.equals(swatch, ignoreCase = true)
                 Box(
                     modifier = Modifier
-                        .size(26.dp)
+                        .size(28.dp)
                         .clip(CircleShape)
                         .background(swatchColor)
                         .border(
@@ -260,7 +435,7 @@ fun ColorPickerField(
 
 @Composable
 fun LiveCardPreview(config: CapsuleConfig) {
-    val cardBg = Color(CapsuleConfig.parseColorSafe(config.cardBgHex, AndroidColor.parseColor("#FF0D1F18")))
+    val cardBg = Color(config.resolveCardBgColor())
     val titleColor = Color(CapsuleConfig.parseColorSafe(config.titleColorHex, AndroidColor.parseColor("#FFECFDF5")))
     val detailColor = Color(CapsuleConfig.parseColorSafe(config.detailColorHex, AndroidColor.parseColor("#FF6EE7B7")))
     val btnBg = Color(CapsuleConfig.parseColorSafe(config.btnBgHex, AndroidColor.parseColor("#FF065F46")))
@@ -269,48 +444,108 @@ fun LiveCardPreview(config: CapsuleConfig) {
     val title = "${config.businessName} · ${config.mainText}"
     val detail = if (config.showTimestamp) "${config.subText} · 19:30:00 (#1)" else config.subText
 
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(26.dp),
-        color = cardBg,
-        tonalElevation = 2.dp
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 14.dp),
-            horizontalAlignment = if (config.cardLayoutStyle == CapsuleConfig.LAYOUT_HERO) {
-                Alignment.CenterHorizontally
-            } else {
-                Alignment.Start
-            }
-        ) {
-            if (config.showAccentBar) {
-                Box(
-                    modifier = Modifier
-                        .width(36.dp)
-                        .height(3.dp)
-                        .clip(RoundedCornerShape(2.dp))
-                        .background(accentColor)
+    // 模拟系统毛玻璃壁纸底衬，方便实时观察背景透明度与灰度效果
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(28.dp))
+            .background(
+                Brush.linearGradient(
+                    listOf(
+                        Color(0xFF9EA5AD),
+                        Color(0xFFC5CCD3),
+                        Color(0xFF8C949C)
+                    )
                 )
-                Spacer(Modifier.height(4.dp))
-            }
-
-            Box(
+            )
+            .padding(2.dp)
+    ) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(26.dp),
+            color = cardBg,
+            tonalElevation = 0.dp
+        ) {
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(64.dp),
-                contentAlignment = Alignment.CenterStart
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                horizontalAlignment = if (config.cardLayoutStyle == CapsuleConfig.LAYOUT_HERO) {
+                    Alignment.CenterHorizontally
+                } else {
+                    Alignment.Start
+                }
             ) {
-                if (config.cardLayoutStyle == CapsuleConfig.LAYOUT_COMPACT_ROW) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+                if (config.showAccentBar) {
+                    Box(
+                        modifier = Modifier
+                            .width(36.dp)
+                            .height(3.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(accentColor)
+                    )
+                    Spacer(Modifier.height(4.dp))
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(64.dp),
+                    contentAlignment = Alignment.CenterStart
+                ) {
+                    if (config.cardLayoutStyle == CapsuleConfig.LAYOUT_COMPACT_ROW) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(end = 10.dp)
+                            ) {
+                                Text(
+                                    text = title,
+                                    color = titleColor,
+                                    fontSize = config.titleSizeSp.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    text = detail,
+                                    color = detailColor,
+                                    fontSize = config.detailSizeSp.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            if (config.showActions) {
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(16.dp))
+                                        .background(btnBg)
+                                        .padding(horizontal = 14.dp, vertical = 7.dp)
+                                ) { Text("刷新", color = accentColor, fontSize = config.btnSizeSp.sp) }
+                                Spacer(Modifier.width(8.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(16.dp))
+                                        .background(btnBg)
+                                        .padding(horizontal = 14.dp, vertical = 7.dp)
+                                ) { Text("停止", color = Color(0xFFFF6B6B), fontSize = config.btnSizeSp.sp) }
+                            }
+                        }
+                    } else {
+                        val align = if (config.cardLayoutStyle == CapsuleConfig.LAYOUT_HERO) TextAlign.Center else TextAlign.Start
                         Column(
-                            modifier = Modifier
-                                .weight(1f)
-                                .padding(end = 10.dp)
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.Center,
+                            horizontalAlignment = if (config.cardLayoutStyle == CapsuleConfig.LAYOUT_HERO) {
+                                Alignment.CenterHorizontally
+                            } else {
+                                Alignment.Start
+                            }
                         ) {
                             Text(
                                 text = title,
@@ -318,85 +553,42 @@ fun LiveCardPreview(config: CapsuleConfig) {
                                 fontSize = config.titleSizeSp.sp,
                                 fontWeight = FontWeight.Bold,
                                 maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = align,
+                                modifier = Modifier.fillMaxWidth()
                             )
-                            Spacer(Modifier.height(4.dp))
                             Text(
                                 text = detail,
                                 color = detailColor,
                                 fontSize = config.detailSizeSp.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                maxLines = if (config.cardLayoutStyle == CapsuleConfig.LAYOUT_MINIMAL) 2 else 1,
+                                overflow = TextOverflow.Ellipsis,
+                                textAlign = align,
+                                modifier = Modifier.fillMaxWidth()
                             )
-                        }
-                        if (config.showActions) {
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(16.dp))
-                                    .background(btnBg)
-                                    .padding(horizontal = 14.dp, vertical = 7.dp)
-                            ) { Text("刷新", color = accentColor, fontSize = config.btnSizeSp.sp) }
-                            Spacer(Modifier.width(8.dp))
-                            Box(
-                                modifier = Modifier
-                                    .clip(RoundedCornerShape(16.dp))
-                                    .background(btnBg)
-                                    .padding(horizontal = 14.dp, vertical = 7.dp)
-                            ) { Text("停止", color = Color(0xFFFF6B6B), fontSize = config.btnSizeSp.sp) }
-                        }
-                    }
-                } else {
-                    val align = if (config.cardLayoutStyle == CapsuleConfig.LAYOUT_HERO) TextAlign.Center else TextAlign.Start
-                    Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalArrangement = Arrangement.Center,
-                        horizontalAlignment = if (config.cardLayoutStyle == CapsuleConfig.LAYOUT_HERO) {
-                            Alignment.CenterHorizontally
-                        } else {
-                            Alignment.Start
-                        }
-                    ) {
-                        Text(
-                            text = title,
-                            color = titleColor,
-                            fontSize = config.titleSizeSp.sp,
-                            fontWeight = FontWeight.Bold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            textAlign = align,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        Text(
-                            text = detail,
-                            color = detailColor,
-                            fontSize = config.detailSizeSp.sp,
-                            maxLines = if (config.cardLayoutStyle == CapsuleConfig.LAYOUT_MINIMAL) 2 else 1,
-                            overflow = TextOverflow.Ellipsis,
-                            textAlign = align,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                        if (config.cardLayoutStyle != CapsuleConfig.LAYOUT_MINIMAL && config.showActions) {
-                            Spacer(Modifier.height(4.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
-                            ) {
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(14.dp))
-                                        .background(btnBg)
-                                        .padding(vertical = 3.dp),
-                                    contentAlignment = Alignment.Center
-                                ) { Text("刷新", color = accentColor, fontSize = config.btnSizeSp.sp) }
-                                Box(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .clip(RoundedCornerShape(14.dp))
-                                        .background(btnBg)
-                                        .padding(vertical = 3.dp),
-                                    contentAlignment = Alignment.Center
-                                ) { Text("停止", color = Color(0xFFFF6B6B), fontSize = config.btnSizeSp.sp) }
+                            if (config.cardLayoutStyle != CapsuleConfig.LAYOUT_MINIMAL && config.showActions) {
+                                Spacer(Modifier.height(4.dp))
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .clip(RoundedCornerShape(14.dp))
+                                            .background(btnBg)
+                                            .padding(vertical = 3.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) { Text("刷新", color = accentColor, fontSize = config.btnSizeSp.sp) }
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .clip(RoundedCornerShape(14.dp))
+                                            .background(btnBg)
+                                            .padding(vertical = 3.dp),
+                                        contentAlignment = Alignment.Center
+                                    ) { Text("停止", color = Color(0xFFFF6B6B), fontSize = config.btnSizeSp.sp) }
+                                }
                             }
                         }
                     }

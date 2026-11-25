@@ -12,8 +12,8 @@ android {
         applicationId = "com.app.magiccapsule"
         minSdk = 31
         targetSdk = 35
-        versionCode = 18
-        versionName = "18.0.0"
+        versionCode = 40
+        versionName = "40.0.0-beta"
     }
 
     buildTypes {
@@ -51,4 +51,8 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.foundation:foundation")
     implementation("androidx.compose.material3:material3")
+
+    // Shizuku 官方 API 与 Provider（支持应用内直接自动申请与授权）
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
 }

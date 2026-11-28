@@ -6,8 +6,9 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.drag
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -28,17 +29,22 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithCache
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -52,6 +58,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.app.magiccapsule.R
 import com.app.magiccapsule.model.CapsuleConfig
+import com.app.magiccapsule.service.LrcCapsuleLyricEngine
 import kotlin.math.roundToInt
 
 /**
@@ -215,6 +222,38 @@ fun SpSizeControl(
     }
 }
 
+@Composable
+fun PxSizeControl(
+    label: String,
+    valuePx: Float,
+    range: ClosedFloatingPointRange<Float>,
+    onChange: (Float) -> Unit
+) {
+    val intVal = valuePx.roundToInt()
+    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text("$label：$intVal px", style = MaterialTheme.typography.bodyMedium)
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                OutlinedButton(
+                    onClick = { onChange((intVal - 2f).coerceIn(range.start, range.endInclusive)) }
+                ) { Text("-2px") }
+                OutlinedButton(
+                    onClick = { onChange((intVal + 2f).coerceIn(range.start, range.endInclusive)) }
+                ) { Text("+2px") }
+            }
+        }
+        Slider(
+            value = valuePx,
+            onValueChange = { onChange(it.roundToInt().toFloat()) },
+            valueRange = range
+        )
+    }
+}
+
 /**
  * 交互式 2D HSV 调色板 + 色相/饱和度/亮度滑块 + 快速色块 + #AARRGGBB 输入
  */
@@ -232,24 +271,39 @@ fun InteractiveColorBoard(
     var hue by remember { mutableFloatStateOf(initialHsv[0]) }
     var sat by remember { mutableFloatStateOf(initialHsv[1]) }
     var value by remember { mutableFloatStateOf(initialHsv[2]) }
+    // 记录本组件刚发出的色值，避免拖动时 LaunchedEffect 反向把 8-bit RGB 量化回 HSV 导致跳变/卡顿
+    var lastEmittedHex by remember { mutableStateOf<String?>(null) }
+    val currentOnHexChange by rememberUpdatedState(onHexChange)
 
-    // 外部切换编辑目标或点击预设色块时同步 HSV
-    LaunchedEffect(hexValue) {
+    // 仅当外部切换调色目标、点击快速色块或手动输入色号时同步 HSV
+    LaunchedEffect(hexValue, label) {
+        if (hexValue.equals(lastEmittedHex, ignoreCase = true)) return@LaunchedEffect
         val c = CapsuleConfig.parseColorSafe(hexValue, fallbackColor)
         val hsv = FloatArray(3)
         AndroidColor.colorToHSV(c, hsv)
-        if (hsv[1] > 0.01f) hue = hsv[0]
+        if (hsv[1] > 0.01f && hsv[2] > 0.01f) hue = hsv[0]
         sat = hsv[1]
         value = hsv[2]
     }
 
     fun emitColor(h: Float, s: Float, v: Float) {
-        val argb = AndroidColor.HSVToColor(255, floatArrayOf(h, s, v))
-        onHexChange(CapsuleConfig.toArgbHex(argb))
+        val ch = h.coerceIn(0f, 360f)
+        val cs = s.coerceIn(0f, 1f)
+        val cv = v.coerceIn(0f, 1f)
+        val argb = AndroidColor.HSVToColor(255, floatArrayOf(ch, cs, cv))
+        val hex = CapsuleConfig.toArgbHex(argb)
+        lastEmittedHex = hex
+        currentOnHexChange(hex)
     }
 
+    val livePreviewColor = Color.hsv(
+        hue.coerceIn(0f, 360f),
+        sat.coerceIn(0f, 1f),
+        value.coerceIn(0f, 1f)
+    )
+
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        // 2D 饱和度 × 亮度调色板
+        // 2D 饱和度 × 亮度调色板（单 pointerInput(Unit) + awaitEachGesture，防止父列表抢手势与中途重启）
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -257,51 +311,64 @@ fun InteractiveColorBoard(
                 .clip(RoundedCornerShape(16.dp))
                 .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(16.dp))
         ) {
-            Canvas(
+            // GPU 着色器缓存分层：渐变 Shader 仅在 hue 变化时通过 drawWithCache 编译缓存，拖动游标时零 Shader 重建
+            val cachedHueColor = Color.hsv(hue.coerceIn(0f, 360f), 1f, 1f)
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(168.dp)
-                    .pointerInput(hue) {
-                        detectTapGestures { offset ->
-                            val newS = (offset.x / size.width).coerceIn(0f, 1f)
-                            val newV = (1f - offset.y / size.height).coerceIn(0f, 1f)
-                            sat = newS
-                            value = newV
-                            emitColor(hue, newS, newV)
+                    .drawWithCache {
+                        val satBrush = Brush.horizontalGradient(listOf(Color.White, cachedHueColor))
+                        val valBrush = Brush.verticalGradient(listOf(Color.Transparent, Color.Black))
+                        onDrawBehind {
+                            drawRect(brush = satBrush)
+                            drawRect(brush = valBrush)
                         }
                     }
-                    .pointerInput(hue) {
-                        detectDragGestures { change, _ ->
-                            change.consume()
-                            val newS = (change.position.x / size.width).coerceIn(0f, 1f)
-                            val newV = (1f - change.position.y / size.height).coerceIn(0f, 1f)
-                            sat = newS
-                            value = newV
-                            emitColor(hue, newS, newV)
+                    .pointerInput(Unit) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown(requireUnconsumed = false)
+                            down.consume()
+                            if (size.width > 0 && size.height > 0) {
+                                val newS = (down.position.x / size.width).coerceIn(0f, 1f)
+                                val newV = (1f - down.position.y / size.height).coerceIn(0f, 1f)
+                                sat = newS
+                                value = newV
+                                emitColor(hue, newS, newV)
+                            }
+                            drag(down.id) { change ->
+                                change.consume()
+                                if (size.width > 0 && size.height > 0) {
+                                    val newS = (change.position.x / size.width).coerceIn(0f, 1f)
+                                    val newV = (1f - change.position.y / size.height).coerceIn(0f, 1f)
+                                    sat = newS
+                                    value = newV
+                                    emitColor(hue, newS, newV)
+                                }
+                            }
                         }
                     }
             ) {
-                val hueColor = Color.hsv(hue.coerceIn(0f, 360f), 1f, 1f)
-                drawRect(
-                    brush = Brush.horizontalGradient(listOf(Color.White, hueColor))
-                )
-                drawRect(
-                    brush = Brush.verticalGradient(listOf(Color.Transparent, Color.Black))
-                )
-                val cx = sat.coerceIn(0f, 1f) * size.width
-                val cy = (1f - value.coerceIn(0f, 1f)) * size.height
-                drawCircle(
-                    color = Color.Black.copy(alpha = 0.45f),
-                    radius = 11.dp.toPx(),
-                    center = Offset(cx, cy),
-                    style = Stroke(width = 3.dp.toPx())
-                )
-                drawCircle(
-                    color = Color.White,
-                    radius = 9.dp.toPx(),
-                    center = Offset(cx, cy),
-                    style = Stroke(width = 2.5.dp.toPx())
-                )
+                Canvas(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(168.dp)
+                ) {
+                    val cx = sat.coerceIn(0f, 1f) * size.width
+                    val cy = (1f - value.coerceIn(0f, 1f)) * size.height
+                    drawCircle(
+                        color = Color.Black.copy(alpha = 0.45f),
+                        radius = 11.dp.toPx(),
+                        center = Offset(cx, cy),
+                        style = Stroke(width = 3.dp.toPx())
+                    )
+                    drawCircle(
+                        color = Color.White,
+                        radius = 9.dp.toPx(),
+                        center = Offset(cx, cy),
+                        style = Stroke(width = 2.5.dp.toPx())
+                    )
+                }
             }
         }
 
@@ -342,6 +409,12 @@ fun InteractiveColorBoard(
                         emitColor(it, sat, value)
                     },
                     valueRange = 0f..360f,
+                    colors = SliderDefaults.colors(
+                        activeTrackColor = Color.Transparent,
+                        inactiveTrackColor = Color.Transparent,
+                        activeTickColor = Color.Transparent,
+                        inactiveTickColor = Color.Transparent
+                    ),
                     modifier = Modifier.fillMaxWidth()
                 )
             }
@@ -394,12 +467,15 @@ fun InteractiveColorBoard(
                 modifier = Modifier
                     .size(32.dp)
                     .clip(CircleShape)
-                    .background(Color(parsedInt))
+                    .background(livePreviewColor)
                     .border(1.dp, MaterialTheme.colorScheme.outline, CircleShape)
             )
             OutlinedTextField(
                 value = hexValue,
-                onValueChange = onHexChange,
+                onValueChange = {
+                    lastEmittedHex = null
+                    currentOnHexChange(it)
+                },
                 label = { Text("$label (#AARRGGBB)") },
                 singleLine = true,
                 modifier = Modifier.weight(1f)
@@ -426,7 +502,10 @@ fun InteractiveColorBoard(
                             color = if (isCurrent) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
                             shape = CircleShape
                         )
-                        .clickable { onHexChange(swatch) }
+                        .clickable {
+                            lastEmittedHex = null
+                            currentOnHexChange(swatch)
+                        }
                 )
             }
         }
@@ -435,165 +514,28 @@ fun InteractiveColorBoard(
 
 @Composable
 fun LiveCardPreview(config: CapsuleConfig) {
-    val cardBg = Color(config.resolveCardBgColor())
-    val titleColor = Color(CapsuleConfig.parseColorSafe(config.titleColorHex, AndroidColor.parseColor("#FFECFDF5")))
-    val detailColor = Color(CapsuleConfig.parseColorSafe(config.detailColorHex, AndroidColor.parseColor("#FF6EE7B7")))
-    val btnBg = Color(CapsuleConfig.parseColorSafe(config.btnBgHex, AndroidColor.parseColor("#FF065F46")))
-    val accentColor = Color(CapsuleConfig.parseColorSafe(config.accentColorHex, AndroidColor.parseColor("#FF34D399")))
+    val liveLyricEvent by LrcCapsuleLyricEngine.liveLyric.collectAsState()
+    val accentColor = Color(CapsuleConfig.parseColorSafe(config.accentColorHex, 0xFF34D399.toInt()))
+    val title = config.mainText.ifBlank { "主文案" }
+    val detail = liveLyricEvent.line.ifBlank { config.subText.ifBlank { "副文案" } }
 
-    val title = "${config.businessName} · ${config.mainText}"
-    val detail = if (config.showTimestamp) "${config.subText} · 19:30:00 (#1)" else config.subText
-
-    // 模拟系统毛玻璃壁纸底衬，方便实时观察背景透明度与灰度效果
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(28.dp))
-            .background(
-                Brush.linearGradient(
-                    listOf(
-                        Color(0xFF9EA5AD),
-                        Color(0xFFC5CCD3),
-                        Color(0xFF8C949C)
-                    )
-                )
-            )
-            .padding(2.dp)
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Surface(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(26.dp),
-            color = cardBg,
-            tonalElevation = 0.dp
-        ) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 14.dp),
-                horizontalAlignment = if (config.cardLayoutStyle == CapsuleConfig.LAYOUT_HERO) {
-                    Alignment.CenterHorizontally
-                } else {
-                    Alignment.Start
-                }
-            ) {
-                if (config.showAccentBar) {
-                    Box(
-                        modifier = Modifier
-                            .width(36.dp)
-                            .height(3.dp)
-                            .clip(RoundedCornerShape(2.dp))
-                            .background(accentColor)
-                    )
-                    Spacer(Modifier.height(4.dp))
-                }
-
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(64.dp),
-                    contentAlignment = Alignment.CenterStart
-                ) {
-                    if (config.cardLayoutStyle == CapsuleConfig.LAYOUT_COMPACT_ROW) {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .padding(end = 10.dp)
-                            ) {
-                                Text(
-                                    text = title,
-                                    color = titleColor,
-                                    fontSize = config.titleSizeSp.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Spacer(Modifier.height(4.dp))
-                                Text(
-                                    text = detail,
-                                    color = detailColor,
-                                    fontSize = config.detailSizeSp.sp,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                            }
-                            if (config.showActions) {
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(16.dp))
-                                        .background(btnBg)
-                                        .padding(horizontal = 14.dp, vertical = 7.dp)
-                                ) { Text("刷新", color = accentColor, fontSize = config.btnSizeSp.sp) }
-                                Spacer(Modifier.width(8.dp))
-                                Box(
-                                    modifier = Modifier
-                                        .clip(RoundedCornerShape(16.dp))
-                                        .background(btnBg)
-                                        .padding(horizontal = 14.dp, vertical = 7.dp)
-                                ) { Text("停止", color = Color(0xFFFF6B6B), fontSize = config.btnSizeSp.sp) }
-                            }
-                        }
-                    } else {
-                        val align = if (config.cardLayoutStyle == CapsuleConfig.LAYOUT_HERO) TextAlign.Center else TextAlign.Start
-                        Column(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalArrangement = Arrangement.Center,
-                            horizontalAlignment = if (config.cardLayoutStyle == CapsuleConfig.LAYOUT_HERO) {
-                                Alignment.CenterHorizontally
-                            } else {
-                                Alignment.Start
-                            }
-                        ) {
-                            Text(
-                                text = title,
-                                color = titleColor,
-                                fontSize = config.titleSizeSp.sp,
-                                fontWeight = FontWeight.Bold,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                textAlign = align,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            Text(
-                                text = detail,
-                                color = detailColor,
-                                fontSize = config.detailSizeSp.sp,
-                                maxLines = if (config.cardLayoutStyle == CapsuleConfig.LAYOUT_MINIMAL) 2 else 1,
-                                overflow = TextOverflow.Ellipsis,
-                                textAlign = align,
-                                modifier = Modifier.fillMaxWidth()
-                            )
-                            if (config.cardLayoutStyle != CapsuleConfig.LAYOUT_MINIMAL && config.showActions) {
-                                Spacer(Modifier.height(4.dp))
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)
-                                ) {
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .clip(RoundedCornerShape(14.dp))
-                                            .background(btnBg)
-                                            .padding(vertical = 3.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) { Text("刷新", color = accentColor, fontSize = config.btnSizeSp.sp) }
-                                    Box(
-                                        modifier = Modifier
-                                            .weight(1f)
-                                            .clip(RoundedCornerShape(14.dp))
-                                            .background(btnBg)
-                                            .padding(vertical = 3.dp),
-                                        contentAlignment = Alignment.Center
-                                    ) { Text("停止", color = Color(0xFFFF6B6B), fontSize = config.btnSizeSp.sp) }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        ElasticCapsulePill(
+            title = title,
+            lyricOrSubText = detail,
+            accentColor = accentColor,
+            lyricTextSizePx = config.capsuleLyricTextSizePx,
+            applyStatusBarPadding = false
+        )
+        ElasticFloatingBanner(
+            config = config,
+            title = title,
+            lyricOrDetail = detail,
+            applyStatusBarPadding = false
+        )
     }
 }

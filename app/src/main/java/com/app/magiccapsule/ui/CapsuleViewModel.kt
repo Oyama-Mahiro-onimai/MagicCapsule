@@ -9,11 +9,12 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.app.magiccapsule.capsule.CapsulePublisher
-import com.app.magiccapsule.capsule.MagicCapsuleBridge
+import com.app.magiccapsule.capsule.honor.MagicCapsuleBridge
 import com.app.magiccapsule.data.CapsulePrefs
 import com.app.magiccapsule.model.CapsuleConfig
 import com.app.magiccapsule.model.CapturedNotification
 import com.app.magiccapsule.model.InstalledApp
+import com.app.magiccapsule.model.SystemStatusSnapshot
 import com.app.magiccapsule.service.CapsuleKeepAliveService
 import com.app.magiccapsule.service.CapsuleNotificationListener
 import com.app.magiccapsule.service.BannerAction
@@ -22,6 +23,7 @@ import com.app.magiccapsule.service.ActiveMirroredPayload
 import com.app.magiccapsule.service.NotificationIconStore
 import com.app.magiccapsule.service.ShizukuBridge
 import com.app.magiccapsule.service.SystemHeadsUpController
+import com.app.magiccapsule.service.SystemStatusMonitor
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -78,6 +80,8 @@ class CapsuleViewModel(application: Application) : AndroidViewModel(application)
     val shizukuGranted: StateFlow<Boolean> = ShizukuBridge.permissionGranted
     val shizukuStatus: StateFlow<String> = ShizukuBridge.statusText
 
+    val systemStatus: StateFlow<SystemStatusSnapshot> = SystemStatusMonitor.snapshot
+
     val pinnedKey: StateFlow<String?> =
         CapsuleNotificationListener.pinnedKey
 
@@ -91,12 +95,40 @@ class CapsuleViewModel(application: Application) : AndroidViewModel(application)
     val isLoadingApps: StateFlow<Boolean> = _isLoadingApps.asStateFlow()
 
     init {
-        loadInstalledApps()
+        val appCtx = getApplication<Application>()
+        SystemStatusMonitor.syncMonitorRegistration(appCtx, _uiState.value.config)
+        SystemStatusMonitor.refreshAsync(appCtx)
         viewModelScope.launch(Dispatchers.IO) {
             ShizukuBridge.init {
                 autoGrantViaShizuku()
+                SystemStatusMonitor.refreshAsync(appCtx)
             }
         }
+    }
+
+    fun refreshSystemStatus() {
+        SystemStatusMonitor.refreshAsync(getApplication()) {
+            setStatus("已刷新系统状态（${if (it.shizukuEnhanced) "含 Shizuku 增强数据" else "基础接口"}）")
+        }
+    }
+
+    fun toggleSystemStatusMonitor(enabled: Boolean) {
+        updateSystemMonitorConfig { it.copy(enableSystemStatusMonitor = enabled) }
+        setStatus(if (enabled) "已开启系统状态自定义事件监听" else "已关闭系统状态事件监听")
+    }
+
+    fun updateSystemMonitorConfig(transform: (CapsuleConfig) -> CapsuleConfig) {
+        val ctx = getApplication<Application>()
+        updateConfig(saveImmediately = true, transform = transform)
+        SystemStatusMonitor.syncMonitorRegistration(ctx, _uiState.value.config)
+    }
+
+    fun pushSystemStatusToCapsule() {
+        val ctx = getApplication<Application>()
+        val cfg = _uiState.value.config
+        prefs.save(cfg)
+        SystemStatusMonitor.pushCurrentStatusToCapsule(ctx, cfg)
+        setStatus("已将当前系统状态推送到灵动胶囊")
     }
 
     fun requestShizukuAndGrant() {
@@ -180,32 +212,55 @@ class CapsuleViewModel(application: Application) : AndroidViewModel(application)
         setStatus("已清空自动模式白名单")
     }
 
+    private val recheckInFlight = java.util.concurrent.atomic.AtomicBoolean(false)
+    @Volatile private var lastRecheckElapsedMs: Long = 0L
+
     fun recheckAllPermissions() {
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (now - lastRecheckElapsedMs < 1500L) return
+        if (!recheckInFlight.compareAndSet(false, true)) return
+        lastRecheckElapsedMs = now
         viewModelScope.launch(Dispatchers.IO) {
-            val ctx = getApplication<Application>()
-            ShizukuBridge.refreshState(autoRequest = false, triggerAutoGrantIfNeeded = false)
-            val notif = CapsuleNotificationListener.isPermissionGranted(ctx)
-            val a11y = CapsuleOverlayAccessibilityService.isServiceEnabled(ctx)
-            val secure = SystemHeadsUpController.hasPermission(ctx)
-            val headsUp = SystemHeadsUpController.isSystemHeadsUpEnabled(ctx)
-            _uiState.update {
-                it.copy(
-                    hasNotificationAccess = notif,
-                    hasAccessibilityEnabled = a11y,
-                    hasWriteSecureSettings = secure,
-                    isSystemHeadsUpEnabled = headsUp
-                )
-            }
-            if (notif) {
-                CapsuleNotificationListener.refreshSnapshot(force = false)
+            try {
+                val ctx = getApplication<Application>()
+                ShizukuBridge.refreshState(autoRequest = false, triggerAutoGrantIfNeeded = false)
+                val notif = CapsuleNotificationListener.isPermissionGranted(ctx)
+                val a11y = CapsuleOverlayAccessibilityService.isServiceEnabled(ctx)
+                val secure = SystemHeadsUpController.hasPermission(ctx)
+                val headsUp = SystemHeadsUpController.isSystemHeadsUpEnabled(ctx)
+                _uiState.update {
+                    it.copy(
+                        hasNotificationAccess = notif,
+                        hasAccessibilityEnabled = a11y,
+                        hasWriteSecureSettings = secure,
+                        isSystemHeadsUpEnabled = headsUp
+                    )
+                }
+                if (notif) {
+                    CapsuleNotificationListener.refreshSnapshot(force = false)
+                }
+            } finally {
+                recheckInFlight.set(false)
             }
         }
     }
 
     fun persistConfig() {
         val cfg = _uiState.value.config
-        viewModelScope.launch(Dispatchers.IO) {
-            prefs.save(cfg)
+        com.app.magiccapsule.service.SoCThreadPools.monitorIoExecutor.execute {
+            runCatching { prefs.save(cfg) }
+        }
+    }
+
+    fun toggleCapsuleEngine(enabled: Boolean) {
+        val ctx = getApplication<Application>()
+        updateConfig(saveImmediately = true) { it.copy(enableCapsuleEngine = enabled) }
+        if (!enabled) {
+            CapsuleNotificationListener.dismissCapsuleOnly(ctx)
+            setStatus("已关闭灵动胶囊引擎（顶层横幅与歌词引擎仍独立运行）")
+        } else {
+            CapsuleNotificationListener.rescanAndRestoreActiveMedia(ctx)
+            setStatus("已开启灵动胶囊引擎并自动恢复活跃媒体")
         }
     }
 
@@ -220,6 +275,14 @@ class CapsuleViewModel(application: Application) : AndroidViewModel(application)
         val shouldSuppress = enableOverlay && suppressHeadsUp && CapsuleOverlayAccessibilityService.connected.value
         if (SystemHeadsUpController.hasPermission(ctx)) {
             SystemHeadsUpController.setSystemHeadsUpSuppressed(ctx, shouldSuppress)
+        }
+        if (enableOverlay) {
+            CapsuleNotificationListener.rescanAndRestoreActiveMedia(ctx)
+        } else {
+            CapsuleOverlayAccessibilityService.dismissBanner()
+            if (!_uiState.value.config.enableUniversalBannerMode) {
+                com.app.magiccapsule.service.UniversalBannerHost.dismiss()
+            }
         }
         recheckAllPermissions()
     }
@@ -269,6 +332,8 @@ class CapsuleViewModel(application: Application) : AndroidViewModel(application)
         val cfg = _uiState.value.config
         prefs.save(cfg)
         CapsuleNotificationListener.pinNotification(null, null)
+        CapsuleNotificationListener.clearAutoMediaIntercept(ctx)
+        CapsulePublisher.setManualCapsulePinned(true)
         val intent = Intent(ctx, CapsuleKeepAliveService::class.java)
             .setAction(CapsuleKeepAliveService.ACTION_START)
         ContextCompat.startForegroundService(ctx, intent)
@@ -288,6 +353,7 @@ class CapsuleViewModel(application: Application) : AndroidViewModel(application)
             contentIntent = null,
             actions = emptyList()
         )
+        CapsulePublisher.setManualCapsulePinned(false)
         CapsuleNotificationListener.pinNotification(item.key, item.packageName)
         CapsulePublisher.publishMirrored(
             context = ctx,
@@ -314,6 +380,7 @@ class CapsuleViewModel(application: Application) : AndroidViewModel(application)
 
     fun stopCapsule() {
         val ctx = getApplication<Application>()
+        CapsulePublisher.setManualCapsulePinned(false)
         CapsuleNotificationListener.pinNotification(null, null)
         CapsulePublisher.dismiss(ctx, reason = "已手动停止灵动胶囊")
         val intent = Intent(ctx, CapsuleKeepAliveService::class.java)

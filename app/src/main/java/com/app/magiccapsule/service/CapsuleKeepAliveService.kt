@@ -10,6 +10,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.os.PowerManager
 import com.app.magiccapsule.capsule.CapsuleNotificationFactory
+import com.app.magiccapsule.crash.AppLogger
 import com.app.magiccapsule.crash.GlobalCrashHandler
 import com.app.magiccapsule.data.CapsulePrefs
 import com.app.magiccapsule.model.CapsuleConfig
@@ -28,6 +29,11 @@ class CapsuleKeepAliveService : Service() {
         const val ACTION_MIRROR_NOTIFICATION = "com.app.magiccapsule.ACTION_MIRROR_NOTIFICATION"
         const val ACTION_STOP = "com.app.magiccapsule.ACTION_STOP"
         const val ACTION_DISMISS_CAPSULE = "com.app.magiccapsule.ACTION_DISMISS_CAPSULE"
+        const val ACTION_MEDIA_PREV = "com.app.magiccapsule.ACTION_MEDIA_PREV"
+        const val ACTION_MEDIA_PLAY_PAUSE = "com.app.magiccapsule.ACTION_MEDIA_PLAY_PAUSE"
+        const val ACTION_MEDIA_NEXT = "com.app.magiccapsule.ACTION_MEDIA_NEXT"
+        const val ACTION_MEDIA_REWIND = "com.app.magiccapsule.ACTION_MEDIA_REWIND"
+        const val ACTION_MEDIA_FAST_FORWARD = "com.app.magiccapsule.ACTION_MEDIA_FAST_FORWARD"
 
         const val EXTRA_PACKAGE_NAME = "extra_package_name"
         const val EXTRA_APP_NAME = "extra_app_name"
@@ -68,7 +74,9 @@ class CapsuleKeepAliveService : Service() {
     private val keepAliveTask: Runnable = object : Runnable {
         override fun run() {
             // 省电：仅在亮屏且确实需要刷新时间戳或计时器时才执行定时重绘
-            if (powerManager.isInteractive && needsPeriodicTick(config)) {
+            val externalCapsuleActive = !isMirroringActive &&
+                CapsuleNotificationListener.activeSourcePackage.value != null
+            if (powerManager.isInteractive && needsPeriodicTick(config) && !externalCapsuleActive) {
                 refreshCount++
                 publish(startFg = !isForegroundStarted)
             }
@@ -98,7 +106,12 @@ class CapsuleKeepAliveService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
+            ACTION_MEDIA_PREV, ACTION_MEDIA_PLAY_PAUSE, ACTION_MEDIA_NEXT -> {
+                CapsuleNotificationListener.dispatchPinnedMediaCommand(this, intent.action.orEmpty())
+                return START_NOT_STICKY
+            }
             ACTION_DISMISS_CAPSULE -> {
+                com.app.magiccapsule.capsule.CapsulePublisher.setManualCapsulePinned(false)
                 handler.removeCallbacks(keepAliveTask)
                 handler.removeCallbacks(autoDismissCapsuleTask)
                 isForegroundStarted = false
@@ -113,6 +126,7 @@ class CapsuleKeepAliveService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_STOP -> {
+                com.app.magiccapsule.capsule.CapsulePublisher.setManualCapsulePinned(false)
                 handler.removeCallbacks(keepAliveTask)
                 handler.removeCallbacks(autoDismissCapsuleTask)
                 isForegroundStarted = false
@@ -196,19 +210,30 @@ class CapsuleKeepAliveService : Service() {
         val payload = if (isMirroringActive) NotificationIconStore.currentActivePayload else null
         val notification = CapsuleNotificationFactory.create(this, config, refreshCount, payload)
         if (startFg) {
-            isForegroundStarted = true
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                startForeground(
-                    CapsuleNotificationFactory.NOTIFY_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                )
-            } else {
-                startForeground(CapsuleNotificationFactory.NOTIFY_ID, notification)
+            runCatching {
+                isForegroundStarted = true
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    startForeground(
+                        CapsuleNotificationFactory.NOTIFY_ID,
+                        notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                    )
+                } else {
+                    startForeground(CapsuleNotificationFactory.NOTIFY_ID, notification)
+                }
+                AppLogger.i("Capsule", "KeepAlive.startForeground 成功 id=${CapsuleNotificationFactory.NOTIFY_ID} mirror=$isMirroringActive count=$refreshCount")
+            }.onFailure { e ->
+                isForegroundStarted = false
+                AppLogger.e("Capsule", "KeepAlive.startForeground 失败，回退 notify", e)
+                runCatching {
+                    getSystemService(NotificationManager::class.java)
+                        .notify(CapsuleNotificationFactory.NOTIFY_ID, notification)
+                }
             }
         } else {
             getSystemService(NotificationManager::class.java)
                 .notify(CapsuleNotificationFactory.NOTIFY_ID, notification)
+            AppLogger.i("Capsule", "KeepAlive.notify 更新成功 id=${CapsuleNotificationFactory.NOTIFY_ID} mirror=$isMirroringActive count=$refreshCount")
         }
     }
 

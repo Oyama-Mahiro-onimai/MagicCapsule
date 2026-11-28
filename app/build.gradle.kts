@@ -12,8 +12,8 @@ android {
         applicationId = "com.app.magiccapsule"
         minSdk = 31
         targetSdk = 35
-        versionCode = 40
-        versionName = "40.0.0-beta"
+        versionCode = 177
+        versionName = "177.0.0"
     }
 
     buildTypes {

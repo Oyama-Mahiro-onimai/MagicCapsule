@@ -117,6 +117,11 @@ object GlobalCrashHandler : Thread.UncaughtExceptionHandler {
             appendLine("Last Status  : ${CapsulePublisher.lastCapsuleStatus.value}")
             appendLine("--------------------------------------------------")
             appendLine(stackTrace.trimEnd())
+            val recentTrail = AppLogger.snapshotRecentLines(15)
+            if (recentTrail.isNotEmpty()) {
+                appendLine("---------- Recent Runtime Trail (${recentTrail.size}) ----------")
+                recentTrail.forEach { appendLine(it) }
+            }
             appendLine()
         }
     }

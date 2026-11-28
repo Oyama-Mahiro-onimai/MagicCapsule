@@ -26,6 +26,8 @@ data class CapsuleConfig(
     val enableTimer: Boolean = false,
     val timerMinutes: Int = 5,
     val refreshIntervalSec: Int = 30,
+    // 灵动胶囊独立总开关（与顶层横幅完全解耦，可单独启停）
+    val enableCapsuleEngine: Boolean = true,
     val autoMirrorNotifications: Boolean = true,
     val ignoreOngoingInAutoMode: Boolean = true,
     val autoThrottleIntervalSec: Int = 5,
@@ -50,10 +52,23 @@ data class CapsuleConfig(
     val capsuleQuietChannelWhenBannerOn: Boolean = true,
     // 方案一：无障碍 TYPE_ACCESSIBILITY_OVERLAY 顶层横幅接管、上下 px 与独立配色
     val enableOverlayBanner: Boolean = false,
+    // 顶层横幅独立忽略高频常驻通知
+    val bannerIgnoreOngoing: Boolean = true,
     val suppressSystemHeadsUp: Boolean = false,
     val overlayBannerDurationSec: Int = 4,
+    val overlayBannerOffsetXPx: Int = 0,
     val overlayBannerOffsetYPx: Int = 0,
     val overlayBannerPaddingVPx: Int = 36,
+    // 横屏顶层横幅独立适配参数（宽度占比、左右偏移 px、顶部距离 px、紧凑上下内边距 px）
+    val landscapeBannerWidthPercent: Int = 46,
+    val landscapeBannerOffsetXPx: Int = 0,
+    val landscapeBannerOffsetYPx: Int = 32,
+    val landscapeBannerPaddingVPx: Int = 14,
+    // 竖屏 / 横屏展开胶囊内容位置自定义（左右/上下微调 px）
+    val portraitCapsuleOffsetXPx: Int = 0,
+    val portraitCapsuleOffsetYPx: Int = 0,
+    val landscapeCapsuleOffsetXPx: Int = 0,
+    val landscapeCapsuleOffsetYPx: Int = 0,
     val overlayBannerBgHex: String = "#FF101816",
     val overlayBannerTitleColorHex: String = "#FFFFFFFF",
     val overlayBannerDetailColorHex: String = "#FFB8D8CC",
@@ -71,6 +86,10 @@ data class CapsuleConfig(
     val titleSizeSp: Float = 15f,
     val detailSizeSp: Float = 12f,
     val btnSizeSp: Float = 12f,
+    // 横幅歌词文本像素大小（px，20–72，默认 36px）
+    val bannerLyricTextSizePx: Float = 36f,
+    // 胶囊/收起态迷你胶囊歌词文本像素大小（px，16–56，默认 30px）
+    val capsuleLyricTextSizePx: Float = 30f,
     val showAccentBar: Boolean = false,
     val showTimestamp: Boolean = false,
     val showActions: Boolean = true,
@@ -79,8 +98,86 @@ data class CapsuleConfig(
     // 横幅通知按钮高度大小（dp，26–56）
     val bannerBtnSizeDp: Int = 34,
     // 胶囊卡片按钮高度大小（dp，24–48）
-    val capsuleBtnSizeDp: Int = 32
+    val capsuleBtnSizeDp: Int = 40,
+    // 监听系统状态变化（充放电/响铃模式）并自动推送到灵动胶囊
+    val enableSystemStatusMonitor: Boolean = false,
+    // 是否已完成首次启动引导与权限须知确认
+    val onboardingCompleted: Boolean = false,
+    // 已同意的用户协议与隐私政策版本号（协议更新后自动提示复核）
+    val acceptedPolicyVersion: Int = 0,
+    // 以后冷启动是否展示品牌开屏（true = 方案 A 显示品牌开屏；false = 方案 B 直达主页；首次打开强制走方案 A）
+    val showLaunchSplash: Boolean = true,
+    // Shizuku / 系统状态自定义触发与常时监控配置
+    val sysContinuousMonitor: Boolean = false,
+    val sysMonitorIntervalSec: Int = 10,
+    val sysCapsuleTitlePrefix: String = "设备监控",
+    val sysTriggerPowerChange: Boolean = true,
+    val sysTriggerLowBattery: Boolean = true,
+    val sysLowBatteryThreshold: Int = 20,
+    val sysTriggerThermalAlert: Boolean = true,
+    val sysThermalTempThresholdC: Int = 42,
+    val sysTriggerRingerChange: Boolean = true,
+    val sysTriggerNetworkChange: Boolean = false,
+    val sysTriggerRefreshRateChange: Boolean = false,
+    val sysTriggerHighRam: Boolean = false,
+    val sysHighRamThresholdPercent: Int = 85,
+    val sysTriggerDozeChange: Boolean = false,
+    // 监听全量系统状态广播（蓝牙/Wi-Fi/飞行/省电/NFC/耳机/勿扰/定位/深色模式/存储/应用安装等）并弹胶囊
+    val sysTriggerAllBroadcasts: Boolean = true,
+    val sysTriggerBluetooth: Boolean = true,
+    val sysTriggerWifiAirplane: Boolean = true,
+    val sysTriggerPowerSave: Boolean = true,
+    val sysTriggerDnd: Boolean = true,
+    val sysTriggerHeadsetAudio: Boolean = true,
+    val sysTriggerSystemToggles: Boolean = true,
+    val sysTriggerAppStorage: Boolean = true,
+    // 自定义胶囊中展示的系统指标字段
+    val sysShowBatteryCurrent: Boolean = true,
+    val sysShowTempThermal: Boolean = true,
+    val sysShowRam: Boolean = true,
+    val sysShowRefreshRate: Boolean = true,
+    val sysShowNetwork: Boolean = false,
+    val sysShowDoze: Boolean = false,
+    // 收起态状态栏胶囊：调用 CapsuleData.setMainContentRemoteViews 注入紧凑小字号以显示更多字符
+    val useCompactPillRemoteViews: Boolean = true,
+    val pillTextSizeSp: Float = 10f,
+    // 竖屏收起态胶囊文本最大视觉宽度单位（中文=2单位，英文/数字=1单位；12–48，默认 30）
+    val portraitPillMaxUnits: Int = 30,
+    // 设备监控胶囊自动切换为荣耀原生 image_text_text 双文案轮播模板（主文案：电量/电流，副文案：温度/刷新率）
+    val sysMonitorDualTextCarousel: Boolean = true,
+    // 设备监控胶囊独立配色（与普通胶囊、顶层横幅完全分离）
+    val sysCapsuleBgHex: String = "#FF0F172A",
+    val sysCapsuleTitleColorHex: String = "#FFF8FAFC",
+    val sysCapsuleDetailColorHex: String = "#FF38BDF8",
+    val sysCapsuleAlphaPercent: Int = 95,
+    val sysCapsuleBrandColor: Int = 2,
+    // 媒体播放与录音机自动拦截到胶囊
+    val enableMediaRecorderCapsule: Boolean = true,
+    val interceptMediaPlayback: Boolean = true,
+    val interceptRecorder: Boolean = true,
+    val mediaCapsuleAutoHideOnPause: Boolean = false,
+    // 媒体胶囊使用系统原生 MediaStyle 卡片（60fps 连续可拖动进度条，零 2.5s 轮询省电）
+    val useNativeSystemMediaCard: Boolean = false,
+    // 在胶囊副标题显示播放器写入的实时单句歌词（android.media.metadata.LYRIC）
+    val showMediaMetadataLyricInCapsule: Boolean = false,
+    // 多地图 Web API 胶囊导航配置（amap / tencent / baidu / osrm）
+    val navProvider: String = "amap",
+    val navMode: String = "driving",
+    val navAmapKey: String = "",
+    val navTencentKey: String = "",
+    val navBaiduKey: String = "",
+    val navLastDestination: String = "",
+    val enableUniversalBannerMode: Boolean = false,
+    // 通用迷你悬浮胶囊屏幕位置适配（top_left / top_center / top_right / below_notch）
+    val universalPillAnchor: String = "below_notch",
+    val universalPillOffsetXPx: Int = 0,
+    val universalPillOffsetYPx: Int = 0,
+    // 独立静默后台防杀守护前台服务（防 MagicOS / OriginOS / HyperOS 杀后台）
+    val enableBackgroundKeepAlive: Boolean = true
 ) {
+    fun hasAnyDisplayEngine(): Boolean =
+        enableCapsuleEngine || enableOverlayBanner || enableUniversalBannerMode
+
     fun resolveCardBgColor(): Int {
         val base = parseColorSafe(cardBgHex, Color.parseColor("#FF0D1F18"))
         return applyGrayscaleAndAlpha(base, cardBgGrayscalePercent, cardBgAlphaPercent)
@@ -91,7 +188,15 @@ data class CapsuleConfig(
         return applyGrayscaleAndAlpha(base, 0, overlayBannerAlphaPercent.coerceIn(20, 100))
     }
 
+    fun resolveSysCapsuleBgColor(): Int {
+        val base = parseColorSafe(sysCapsuleBgHex, Color.parseColor("#FF0F172A"))
+        return applyGrayscaleAndAlpha(base, 0, sysCapsuleAlphaPercent.coerceIn(20, 100))
+    }
+
     companion object {
+        const val CURRENT_POLICY_VERSION = 2
+        const val GITHUB_REPO_URL = "https://github.com/Oyama-Mahiro-onimai/MagicCapsule"
+        const val TEMPLATE_IMAGE_IMAGE = "image_image"
         const val TEMPLATE_IMAGE_TEXT = "image_text"
         const val TEMPLATE_IMAGE_TEXT_TEXT = "image_text_text"
         const val TEMPLATE_IMAGE_TIMER = "image_timer"
@@ -180,6 +285,7 @@ data class CapsuleConfig(
         )
 
         val ALL_TEMPLATES = listOf(
+            TEMPLATE_IMAGE_IMAGE to "双图（原生音乐）",
             TEMPLATE_IMAGE_TEXT to "图文",
             TEMPLATE_IMAGE_TEXT_TEXT to "双文案轮播",
             TEMPLATE_IMAGE_TIMER to "图标+计时",

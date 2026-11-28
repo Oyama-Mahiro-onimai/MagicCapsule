@@ -7,6 +7,7 @@ import com.app.magiccapsule.service.NotificationIconStore
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -231,24 +232,76 @@ fun ColorEditorPage(
     onUpdateConfig: (Boolean, (CapsuleConfig) -> CapsuleConfig) -> Unit,
     onApply: () -> Unit
 ) {
-    val targets = remember {
-        listOf("通知/卡片底色", "标题色", "副文色", "按钮底色", "强调色")
-    }
+    // 0=灵动胶囊, 1=顶层横幅, 2=设备监控胶囊（三套颜色完全分离）
+    val scopes = remember { listOf("灵动胶囊", "顶层横幅", "设备监控胶囊") }
+    var selectedScope by remember { mutableIntStateOf(0) }
     var selectedTarget by remember { mutableIntStateOf(0) }
 
-    val currentHex = when (selectedTarget) {
-        0 -> config.cardBgHex
-        1 -> config.titleColorHex
-        2 -> config.detailColorHex
-        3 -> config.btnBgHex
-        else -> config.accentColorHex
+    val targets = when (selectedScope) {
+        0 -> listOf("通知/卡片底色", "标题色", "副文色", "按钮底色", "强调色")
+        1 -> listOf("横幅底色", "横幅标题色", "横幅副文色")
+        else -> listOf("监控底色", "监控标题色", "监控副文色")
     }
-    val currentFallback = when (selectedTarget) {
-        0 -> AndroidColor.parseColor("#FF0D1F18")
-        1 -> AndroidColor.parseColor("#FFECFDF5")
-        2 -> AndroidColor.parseColor("#FF6EE7B7")
-        3 -> AndroidColor.parseColor("#FF065F46")
-        else -> AndroidColor.parseColor("#FF34D399")
+    if (selectedTarget >= targets.size) selectedTarget = 0
+
+    val currentHex = when (selectedScope) {
+        0 -> when (selectedTarget) {
+            0 -> config.cardBgHex
+            1 -> config.titleColorHex
+            2 -> config.detailColorHex
+            3 -> config.btnBgHex
+            else -> config.accentColorHex
+        }
+        1 -> when (selectedTarget) {
+            0 -> config.overlayBannerBgHex
+            1 -> config.overlayBannerTitleColorHex
+            else -> config.overlayBannerDetailColorHex
+        }
+        else -> when (selectedTarget) {
+            0 -> config.sysCapsuleBgHex
+            1 -> config.sysCapsuleTitleColorHex
+            else -> config.sysCapsuleDetailColorHex
+        }
+    }
+    val currentFallback = when (selectedScope) {
+        0 -> when (selectedTarget) {
+            0 -> AndroidColor.parseColor("#FF0D1F18")
+            1 -> AndroidColor.parseColor("#FFECFDF5")
+            2 -> AndroidColor.parseColor("#FF6EE7B7")
+            3 -> AndroidColor.parseColor("#FF065F46")
+            else -> AndroidColor.parseColor("#FF34D399")
+        }
+        1 -> when (selectedTarget) {
+            0 -> AndroidColor.parseColor("#FF101816")
+            1 -> AndroidColor.parseColor("#FFFFFFFF")
+            else -> AndroidColor.parseColor("#FFB8D8CC")
+        }
+        else -> when (selectedTarget) {
+            0 -> AndroidColor.parseColor("#FF0F172A")
+            1 -> AndroidColor.parseColor("#FFF8FAFC")
+            else -> AndroidColor.parseColor("#FF38BDF8")
+        }
+    }
+
+    val previewConfig = when (selectedScope) {
+        1 -> config.copy(
+            cardBgHex = config.overlayBannerBgHex,
+            cardBgAlphaPercent = config.overlayBannerAlphaPercent,
+            cardBgGrayscalePercent = 0,
+            titleColorHex = config.overlayBannerTitleColorHex,
+            detailColorHex = config.overlayBannerDetailColorHex
+        )
+        2 -> config.copy(
+            businessName = config.sysCapsuleTitlePrefix.ifBlank { "设备监控" },
+            mainText = "23% -837mA",
+            subText = "32.1°C · 120Hz · RAM 58%",
+            cardBgHex = config.sysCapsuleBgHex,
+            cardBgAlphaPercent = config.sysCapsuleAlphaPercent,
+            cardBgGrayscalePercent = 0,
+            titleColorHex = config.sysCapsuleTitleColorHex,
+            detailColorHex = config.sysCapsuleDetailColorHex
+        )
+        else -> config
     }
 
     Column(
@@ -259,10 +312,28 @@ fun ColorEditorPage(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("实时效果预览（含透明度与灰度）", style = MaterialTheme.typography.labelLarge)
-        LiveCardPreview(config)
+        Text("选择独立配色对象（三套配色互不干扰）", style = MaterialTheme.typography.labelLarge)
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            scopes.forEachIndexed { idx, label ->
+                FilterChip(
+                    selected = selectedScope == idx,
+                    onClick = {
+                        selectedScope = idx
+                        selectedTarget = 0
+                    },
+                    label = { Text(label) }
+                )
+            }
+        }
 
-        // 背景透明度与灰度专属控制卡
+        Text("实时效果预览（${scopes[selectedScope]}）", style = MaterialTheme.typography.labelLarge)
+        LiveCardPreview(previewConfig)
+
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(
                 modifier = Modifier.padding(14.dp),
@@ -270,60 +341,109 @@ fun ColorEditorPage(
             ) {
                 StatusIconRow(
                     iconRes = R.drawable.ic_px_tune,
-                    text = "通知背景透明度与灰度",
+                    text = "${scopes[selectedScope]}背景透明度与专属参数",
                     tint = MaterialTheme.colorScheme.primary
                 )
-                Column {
-                    Text(
-                        text = "背景不透明度：${config.cardBgAlphaPercent}%（0% 完全透明，100% 纯实色）",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Slider(
-                        value = config.cardBgAlphaPercent.toFloat(),
-                        onValueChange = { v ->
-                            onUpdateConfig(false) {
-                                it.copy(cardBgAlphaPercent = v.roundToInt().coerceIn(0, 100))
-                            }
-                        },
-                        valueRange = 0f..100f
-                    )
-                }
-                Column {
-                    Text(
-                        text = "背景灰度：${config.cardBgGrayscalePercent}%（0% 原色，100% 纯黑白灰）",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Slider(
-                        value = config.cardBgGrayscalePercent.toFloat(),
-                        onValueChange = { v ->
-                            onUpdateConfig(false) {
-                                it.copy(cardBgGrayscalePercent = v.roundToInt().coerceIn(0, 100))
-                            }
-                        },
-                        valueRange = 0f..100f
-                    )
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
-                        Text("通知中心跟随系统毛玻璃", style = MaterialTheme.typography.bodyMedium)
-                        Text(
-                            text = "下拉通知栏背景完全透明融合系统毛玻璃，顶部胶囊仍保留自定义底色",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = config.compactBgFollowSystemGlass,
-                        onCheckedChange = { c ->
-                            onUpdateConfig(true) { it.copy(compactBgFollowSystemGlass = c) }
+                when (selectedScope) {
+                    0 -> {
+                        Column {
+                            Text(
+                                text = "胶囊背景不透明度：${config.cardBgAlphaPercent}%",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Slider(
+                                value = config.cardBgAlphaPercent.toFloat(),
+                                onValueChange = { v ->
+                                    onUpdateConfig(false) { it.copy(cardBgAlphaPercent = v.roundToInt().coerceIn(0, 100)) }
+                                },
+                                onValueChangeFinished = { onUpdateConfig(true) { it } },
+                                valueRange = 0f..100f
+                            )
                         }
-                    )
+                        Column {
+                            Text(
+                                text = "胶囊背景灰度：${config.cardBgGrayscalePercent}%",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Slider(
+                                value = config.cardBgGrayscalePercent.toFloat(),
+                                onValueChange = { v ->
+                                    onUpdateConfig(false) { it.copy(cardBgGrayscalePercent = v.roundToInt().coerceIn(0, 100)) }
+                                },
+                                onValueChangeFinished = { onUpdateConfig(true) { it } },
+                                valueRange = 0f..100f
+                            )
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                                Text("通知中心跟随系统毛玻璃", style = MaterialTheme.typography.bodyMedium)
+                                Text(
+                                    text = "下拉通知栏背景透明融合系统毛玻璃，顶部胶囊仍保留自定义底色",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = config.compactBgFollowSystemGlass,
+                                onCheckedChange = { c -> onUpdateConfig(true) { it.copy(compactBgFollowSystemGlass = c) } }
+                            )
+                        }
+                    }
+                    1 -> {
+                        Column {
+                            Text(
+                                text = "横幅背景不透明度：${config.overlayBannerAlphaPercent}%",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Slider(
+                                value = config.overlayBannerAlphaPercent.toFloat(),
+                                onValueChange = { v ->
+                                    onUpdateConfig(false) { it.copy(overlayBannerAlphaPercent = v.roundToInt().coerceIn(20, 100)) }
+                                },
+                                onValueChangeFinished = { onUpdateConfig(true) { it } },
+                                valueRange = 20f..100f
+                            )
+                        }
+                    }
+                    else -> {
+                        Column {
+                            Text(
+                                text = "监控胶囊背景不透明度：${config.sysCapsuleAlphaPercent}%",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Slider(
+                                value = config.sysCapsuleAlphaPercent.toFloat(),
+                                onValueChange = { v ->
+                                    onUpdateConfig(false) { it.copy(sysCapsuleAlphaPercent = v.roundToInt().coerceIn(20, 100)) }
+                                },
+                                onValueChangeFinished = { onUpdateConfig(true) { it } },
+                                valueRange = 20f..100f
+                            )
+                        }
+                        Text("监控状态栏胶囊品牌色号（1–12）：", style = MaterialTheme.typography.bodySmall)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            (1..12).forEach { c ->
+                                FilterChip(
+                                    selected = config.sysCapsuleBrandColor == c,
+                                    onClick = { onUpdateConfig(true) { it.copy(sysCapsuleBrandColor = c) } },
+                                    label = { Text("色#$c") }
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -335,11 +455,11 @@ fun ColorEditorPage(
                 .horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            targets.forEachIndexed { idx, name ->
+            targets.forEachIndexed { idx, label ->
                 FilterChip(
                     selected = selectedTarget == idx,
                     onClick = { selectedTarget = idx },
-                    label = { Text(name) }
+                    label = { Text(label) }
                 )
             }
         }
@@ -350,14 +470,26 @@ fun ColorEditorPage(
                     label = targets[selectedTarget],
                     hexValue = currentHex,
                     fallbackColor = currentFallback,
-                    onHexChange = { hex ->
+                    onHexChange = { newHex ->
                         onUpdateConfig(false) { cfg ->
-                            when (selectedTarget) {
-                                0 -> cfg.copy(cardBgHex = hex)
-                                1 -> cfg.copy(titleColorHex = hex)
-                                2 -> cfg.copy(detailColorHex = hex)
-                                3 -> cfg.copy(btnBgHex = hex)
-                                else -> cfg.copy(accentColorHex = hex)
+                            when (selectedScope) {
+                                0 -> when (selectedTarget) {
+                                    0 -> cfg.copy(cardBgHex = newHex)
+                                    1 -> cfg.copy(titleColorHex = newHex)
+                                    2 -> cfg.copy(detailColorHex = newHex)
+                                    3 -> cfg.copy(btnBgHex = newHex)
+                                    else -> cfg.copy(accentColorHex = newHex)
+                                }
+                                1 -> when (selectedTarget) {
+                                    0 -> cfg.copy(overlayBannerBgHex = newHex)
+                                    1 -> cfg.copy(overlayBannerTitleColorHex = newHex)
+                                    else -> cfg.copy(overlayBannerDetailColorHex = newHex)
+                                }
+                                else -> when (selectedTarget) {
+                                    0 -> cfg.copy(sysCapsuleBgHex = newHex)
+                                    1 -> cfg.copy(sysCapsuleTitleColorHex = newHex)
+                                    else -> cfg.copy(sysCapsuleDetailColorHex = newHex)
+                                }
                             }
                         }
                     }
@@ -369,7 +501,7 @@ fun ColorEditorPage(
             onClick = onApply,
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(top = 4.dp, bottom = 16.dp)
+                .padding(bottom = 16.dp)
         ) {
             Icon(
                 painter = painterResource(id = R.drawable.ic_px_check_circle),
@@ -377,7 +509,7 @@ fun ColorEditorPage(
                 modifier = Modifier.size(18.dp)
             )
             Spacer(Modifier.width(6.dp))
-            Text("保存并立即应用到灵动胶囊")
+            Text("保存并应用配色到灵动胶囊")
         }
     }
 }
@@ -396,7 +528,7 @@ fun TypographyEditorPage(
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Text("实时效果预览（整体展开高度已锁定不变）", style = MaterialTheme.typography.labelLarge)
+        Text("胶囊与横幅弹性实时预览", style = MaterialTheme.typography.labelLarge)
         LiveCardPreview(config)
 
         SpSizeControl("标题字号", config.titleSizeSp, 10f..26f) { sp ->
@@ -408,6 +540,12 @@ fun TypographyEditorPage(
         SpSizeControl("按钮字号", config.btnSizeSp, 9f..16f) { sp ->
             onUpdateConfig(false) { it.copy(btnSizeSp = sp) }
         }
+        PxSizeControl("横幅歌词字号", config.bannerLyricTextSizePx, 20f..72f) { px ->
+            onUpdateConfig(false) { it.copy(bannerLyricTextSizePx = px) }
+        }
+        PxSizeControl("胶囊歌词字号", config.capsuleLyricTextSizePx, 16f..56f) { px ->
+            onUpdateConfig(false) { it.copy(capsuleLyricTextSizePx = px) }
+        }
 
         Row(
             modifier = Modifier
@@ -418,7 +556,7 @@ fun TypographyEditorPage(
             OutlinedButton(
                 onClick = {
                     onUpdateConfig(true) {
-                        it.copy(titleSizeSp = 15f, detailSizeSp = 12f, btnSizeSp = 12f)
+                        it.copy(titleSizeSp = 15f, detailSizeSp = 12f, btnSizeSp = 12f, bannerLyricTextSizePx = 36f, capsuleLyricTextSizePx = 30f)
                     }
                 },
                 modifier = Modifier.weight(1f)
@@ -879,6 +1017,115 @@ fun BannerHijackSettingsPage(
             }
         }
 
+        // 迷你悬浮胶囊屏幕位置适配（避开水滴/挖孔屏）
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(
+                modifier = Modifier.padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                val pillCtx = androidx.compose.ui.platform.LocalContext.current
+                StatusIconRow(
+                    iconRes = R.drawable.ic_px_tune,
+                    text = "迷你悬浮胶囊屏幕位置（避开水滴/挖孔）",
+                    tint = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    text = "根据手机前摄水滴/挖孔位置选择停靠区域，拖动滑块时可实时预览悬浮位置做到零遮挡。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                val anchorOptions = listOf(
+                    "below_notch" to "水滴/刘海下方",
+                    "top_left" to "顶部靠左",
+                    "top_center" to "顶部居中",
+                    "top_right" to "顶部靠右"
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .horizontalScroll(rememberScrollState()),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    anchorOptions.forEach { (key, label) ->
+                        FilterChip(
+                            selected = config.universalPillAnchor == key,
+                            onClick = {
+                                val next = config.copy(universalPillAnchor = key)
+                                onUpdateConfig(true) { next }
+                                com.app.magiccapsule.service.UniversalBannerHost.updatePillPositionLive(pillCtx, next)
+                            },
+                            label = { Text(label) }
+                        )
+                    }
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = "迷你胶囊左右微调 (X)：${config.universalPillOffsetXPx} px",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Slider(
+                        value = config.universalPillOffsetXPx.toFloat(),
+                        onValueChange = { v ->
+                            val next = config.copy(universalPillOffsetXPx = v.roundToInt().coerceIn(-360, 360))
+                            onUpdateConfig(false) { next }
+                            com.app.magiccapsule.service.UniversalBannerHost.updatePillPositionLive(pillCtx, next)
+                        },
+                        onValueChangeFinished = { onUpdateConfig(true) { it } },
+                        valueRange = -360f..360f
+                    )
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = "迷你胶囊上下微调 (Y)：${config.universalPillOffsetYPx} px",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Slider(
+                        value = config.universalPillOffsetYPx.toFloat(),
+                        onValueChange = { v ->
+                            val next = config.copy(universalPillOffsetYPx = v.roundToInt().coerceIn(0, 240))
+                            onUpdateConfig(false) { next }
+                            com.app.magiccapsule.service.UniversalBannerHost.updatePillPositionLive(pillCtx, next)
+                        },
+                        onValueChangeFinished = { onUpdateConfig(true) { it } },
+                        valueRange = 0f..240f
+                    )
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            com.app.magiccapsule.service.UniversalBannerHost.showPositionPreviewPill(pillCtx, config)
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("实时预览位置")
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            com.app.magiccapsule.service.UniversalBannerHost.dismiss()
+                        }
+                    ) {
+                        Text("关闭预览")
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            val reset = config.copy(
+                                universalPillAnchor = "below_notch",
+                                universalPillOffsetXPx = 0,
+                                universalPillOffsetYPx = 0
+                            )
+                            onUpdateConfig(true) { reset }
+                            com.app.magiccapsule.service.UniversalBannerHost.updatePillPositionLive(pillCtx, reset)
+                        }
+                    ) {
+                        Text("重置")
+                    }
+                }
+            }
+        }
+
         // 横幅上下 px 位置与厚度控制
         Card(modifier = Modifier.fillMaxWidth()) {
             Column(
@@ -897,7 +1144,52 @@ fun BannerHijackSettingsPage(
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
                         Text(
+                            text = "竖屏左右位置偏移：${config.overlayBannerOffsetXPx} px",
+                            modifier = Modifier.weight(1f).padding(end = 6.dp),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    onUpdateConfig(true) {
+                                        it.copy(overlayBannerOffsetXPx = (it.overlayBannerOffsetXPx - 8).coerceIn(-240, 240))
+                                    }
+                                }
+                            ,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                            ) { Text("-8px", maxLines = 1, softWrap = false) }
+                            OutlinedButton(
+                                onClick = {
+                                    onUpdateConfig(true) {
+                                        it.copy(overlayBannerOffsetXPx = (it.overlayBannerOffsetXPx + 8).coerceIn(-240, 240))
+                                    }
+                                }
+                            ,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                            ) { Text("+8px", maxLines = 1, softWrap = false) }
+                        }
+                    }
+                    Slider(
+                        value = config.overlayBannerOffsetXPx.toFloat(),
+                        onValueChange = { v ->
+                            onUpdateConfig(false) {
+                                it.copy(overlayBannerOffsetXPx = v.roundToInt().coerceIn(-240, 240))
+                            }
+                        },
+                        onValueChangeFinished = { onUpdateConfig(true) { it } },
+                        valueRange = -240f..240f
+                    )
+                }
+
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
                             text = "上下位置偏移：${config.overlayBannerOffsetYPx} px",
+                            modifier = Modifier.weight(1f).padding(end = 6.dp),
                             style = MaterialTheme.typography.bodyMedium
                         )
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -907,14 +1199,18 @@ fun BannerHijackSettingsPage(
                                         it.copy(overlayBannerOffsetYPx = (it.overlayBannerOffsetYPx - 10).coerceIn(-120, 360))
                                     }
                                 }
-                            ) { Text("-10px") }
+                            ,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                            ) { Text("-10px", maxLines = 1, softWrap = false) }
                             OutlinedButton(
                                 onClick = {
                                     onUpdateConfig(true) {
                                         it.copy(overlayBannerOffsetYPx = (it.overlayBannerOffsetYPx + 10).coerceIn(-120, 360))
                                     }
                                 }
-                            ) { Text("+10px") }
+                            ,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                            ) { Text("+10px", maxLines = 1, softWrap = false) }
                         }
                     }
                     Slider(
@@ -963,6 +1259,165 @@ fun BannerHijackSettingsPage(
                             }
                         },
                         valueRange = 8f..120f
+                    )
+                }
+
+                Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                    Text(
+                        text = "横屏横幅独立适配（不继承竖屏大边距与挖孔偏移）",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "横屏宽度占比：${config.landscapeBannerWidthPercent}%",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    onUpdateConfig(true) {
+                                        it.copy(landscapeBannerWidthPercent = (it.landscapeBannerWidthPercent - 2).coerceIn(32, 75))
+                                    }
+                                }
+                            ) { Text("-2%") }
+                            OutlinedButton(
+                                onClick = {
+                                    onUpdateConfig(true) {
+                                        it.copy(landscapeBannerWidthPercent = (it.landscapeBannerWidthPercent + 2).coerceIn(32, 75))
+                                    }
+                                }
+                            ) { Text("+2%") }
+                        }
+                    }
+                    Slider(
+                        value = config.landscapeBannerWidthPercent.toFloat(),
+                        onValueChange = { v ->
+                            onUpdateConfig(false) {
+                                it.copy(landscapeBannerWidthPercent = v.roundToInt().coerceIn(32, 75))
+                            }
+                        },
+                        onValueChangeFinished = { onUpdateConfig(true) { it } },
+                        valueRange = 32f..75f
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "横屏左右位置偏移：${config.landscapeBannerOffsetXPx} px",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    onUpdateConfig(true) {
+                                        it.copy(landscapeBannerOffsetXPx = (it.landscapeBannerOffsetXPx - 10).coerceIn(-400, 400))
+                                    }
+                                }
+                            ,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                            ) { Text("-10px", maxLines = 1, softWrap = false) }
+                            OutlinedButton(
+                                onClick = {
+                                    onUpdateConfig(true) {
+                                        it.copy(landscapeBannerOffsetXPx = (it.landscapeBannerOffsetXPx + 10).coerceIn(-400, 400))
+                                    }
+                                }
+                            ,
+                                contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp)
+                            ) { Text("+10px", maxLines = 1, softWrap = false) }
+                        }
+                    }
+                    Slider(
+                        value = config.landscapeBannerOffsetXPx.toFloat(),
+                        onValueChange = { v ->
+                            onUpdateConfig(false) {
+                                it.copy(landscapeBannerOffsetXPx = v.roundToInt().coerceIn(-400, 400))
+                            }
+                        },
+                        onValueChangeFinished = { onUpdateConfig(true) { it } },
+                        valueRange = -400f..400f
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "横屏顶部距离：${config.landscapeBannerOffsetYPx} px",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    onUpdateConfig(true) {
+                                        it.copy(landscapeBannerOffsetYPx = (it.landscapeBannerOffsetYPx - 4).coerceIn(0, 240))
+                                    }
+                                }
+                            ) { Text("-4px") }
+                            OutlinedButton(
+                                onClick = {
+                                    onUpdateConfig(true) {
+                                        it.copy(landscapeBannerOffsetYPx = (it.landscapeBannerOffsetYPx + 4).coerceIn(0, 240))
+                                    }
+                                }
+                            ) { Text("+4px") }
+                        }
+                    }
+                    Slider(
+                        value = config.landscapeBannerOffsetYPx.toFloat(),
+                        onValueChange = { v ->
+                            onUpdateConfig(false) {
+                                it.copy(landscapeBannerOffsetYPx = v.roundToInt().coerceIn(0, 240))
+                            }
+                        },
+                        onValueChangeFinished = { onUpdateConfig(true) { it } },
+                        valueRange = 0f..240f
+                    )
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "横屏上下内边距（厚度）：${config.landscapeBannerPaddingVPx} px",
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            OutlinedButton(
+                                onClick = {
+                                    onUpdateConfig(true) {
+                                        it.copy(landscapeBannerPaddingVPx = (it.landscapeBannerPaddingVPx - 2).coerceIn(6, 60))
+                                    }
+                                }
+                            ) { Text("-2px") }
+                            OutlinedButton(
+                                onClick = {
+                                    onUpdateConfig(true) {
+                                        it.copy(landscapeBannerPaddingVPx = (it.landscapeBannerPaddingVPx + 2).coerceIn(6, 60))
+                                    }
+                                }
+                            ) { Text("+2px") }
+                        }
+                    }
+                    Slider(
+                        value = config.landscapeBannerPaddingVPx.toFloat(),
+                        onValueChange = { v ->
+                            onUpdateConfig(false) {
+                                it.copy(landscapeBannerPaddingVPx = v.roundToInt().coerceIn(6, 60))
+                            }
+                        },
+                        onValueChangeFinished = { onUpdateConfig(true) { it } },
+                        valueRange = 6f..60f
                     )
                 }
             }
@@ -1115,7 +1570,7 @@ fun CrashLogViewerPage(
                 TextButton(
                     onClick = {
                         showCrashConfirm = false
-                        throw RuntimeException("MagicCapsule 手动崩溃自检测试 (v32.0.0)")
+                        val ver = runCatching { context.packageManager.getPackageInfo(context.packageName, 0).versionName ?: "unknown" }.getOrDefault("unknown"); throw RuntimeException("MagicCapsule 手动崩溃自检测试 (v$ver)")
                     }
                 ) { Text("确认触发", color = MaterialTheme.colorScheme.error) }
             },

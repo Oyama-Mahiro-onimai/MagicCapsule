@@ -13,26 +13,35 @@ import android.graphics.Color
 import android.graphics.Outline
 import android.graphics.PixelFormat
 import android.graphics.Typeface
-import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.text.TextUtils
 import android.util.TypedValue
+import android.media.AudioManager
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.view.ViewConfiguration
 import android.view.ViewOutlineProvider
 import android.view.WindowInsets
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import android.view.animation.AccelerateInterpolator
+import android.transition.ChangeBounds
+import android.transition.TransitionManager
 import android.view.animation.DecelerateInterpolator
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.content.res.ColorStateList
+import android.os.SystemClock
+import android.widget.ProgressBar
 import android.widget.TextView
+import androidx.core.content.ContextCompat
+import com.app.magiccapsule.R
 import com.app.magiccapsule.crash.AppLogger
 import com.app.magiccapsule.data.CapsulePrefs
 import com.app.magiccapsule.model.CapsuleConfig
@@ -90,7 +99,13 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
             actions: List<BannerAction> = emptyList(),
             config: CapsuleConfig,
             notificationKey: String? = null,
-            isPersistent: Boolean = false
+            isPersistent: Boolean = false,
+            isMedia: Boolean = false,
+            mediaDurationMs: Long = 0L,
+            mediaPositionMs: Long = 0L,
+            mediaPlaying: Boolean = false,
+            mediaContentType: MediaContentType = MediaContentType.MUSIC,
+            mediaSupportsSeek: Boolean = false
         ): Boolean {
             val svc = instance
             if (svc == null) {
@@ -99,9 +114,47 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
             }
             svc.postShowBanner(
                 appName, packageName, title, text, contentIntent,
-                iconBitmap, actions, config, notificationKey, isPersistent
+                iconBitmap, actions, config, notificationKey, isPersistent,
+                isMedia, mediaDurationMs, mediaPositionMs, mediaPlaying, mediaContentType, mediaSupportsSeek
             )
             return true
+        }
+
+        fun updateBannerMediaProgress(
+            key: String?,
+            positionMs: Long,
+            durationMs: Long,
+            playing: Boolean,
+            speed: Float = 1f
+        ) {
+            if (key.isNullOrBlank()) return
+            instance?.postUpdateBannerMediaProgress(key, positionMs, durationMs, playing, speed)
+        }
+
+        fun refreshLyricLabel(packageName: String, label: String) {
+            instance?.postRefreshLyricLabel(packageName, label)
+        }
+
+        fun onTrackSwitchingPlaceholder(
+            context: Context,
+            key: String?,
+            packageName: String,
+            appName: String,
+            newTitle: String,
+            trackToken: String
+        ) {
+            if (key.isNullOrBlank()) return
+            instance?.postTrackSwitchingPlaceholder(context.applicationContext, key, packageName, appName, newTitle, trackToken)
+        }
+
+        fun applyTaggedCoverBitmap(key: String?, trackToken: String, bmp: Bitmap?) {
+            if (key.isNullOrBlank() || bmp == null || bmp.isRecycled) return
+            instance?.postApplyTaggedCoverBitmap(key, trackToken, bmp)
+        }
+
+        fun updateLiveLyric(key: String?, lyricLine: String) {
+            if (key.isNullOrBlank() || lyricLine.isBlank()) return
+            instance?.postUpdateLiveLyric(key, lyricLine)
         }
 
         fun isBannerVisible(): Boolean = instance?.currentOverlayView != null
@@ -121,6 +174,154 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
     private var currentBannerKey: String? = null
     private var currentDurationMs: Long = 4000L
     private val autoDismissRunnable = Runnable { removeViewImmediate() }
+    private var currentBannerProgressBar: ProgressBar? = null
+    private var bannerSeekBarResetAnimator: android.animation.Animator? = null
+    private var currentBannerTimeText: TextView? = null
+    private var currentBannerLyricBtn: TextView? = null
+    private var currentBannerPlayPauseBtn: TextView? = null
+    private var currentBannerDetailView: TextView? = null
+    private var currentBannerTitleView: TextView? = null
+    private var currentBannerIconView: ImageView? = null
+    private var currentBannerTrackToken: String = ""
+    private var currentBannerPackageName: String? = null
+    private var currentBannerMediaDurMs: Long = 0L
+    private var currentBannerMediaPosMs: Long = 0L
+    private var currentBannerMediaAnchorElapsedMs: Long = 0L
+    private var currentBannerMediaPlaying: Boolean = false
+    private var currentBannerMediaSpeed: Float = 1f
+
+    private val bannerMediaTicker: Runnable = object : Runnable {
+        override fun run() {
+            if (currentOverlayView == null || !currentBannerMediaPlaying || currentBannerMediaSpeed <= 0f || currentBannerMediaDurMs <= 0L) {
+                return
+            }
+            val elapsed = (SystemClock.elapsedRealtime() - currentBannerMediaAnchorElapsedMs).coerceAtLeast(0L)
+            val livePos = (currentBannerMediaPosMs + (elapsed * currentBannerMediaSpeed).toLong()).coerceIn(0L, currentBannerMediaDurMs)
+            if (bannerSeekBarResetAnimator?.isRunning != true) {
+                val permille = ((livePos * 1000L) / currentBannerMediaDurMs).toInt().coerceIn(0, 1000)
+                currentBannerProgressBar?.progress = permille
+            }
+            currentBannerTimeText?.text = "${formatMediaMs(livePos)} / ${formatMediaMs(currentBannerMediaDurMs)}"
+            mainHandler.postDelayed(this, 1000L)
+        }
+    }
+
+    private fun formatMediaMs(ms: Long): String {
+        val totalSec = (ms / 1000L).coerceAtLeast(0L)
+        val hours = totalSec / 3600L
+        val mins = (totalSec % 3600L) / 60L
+        val secs = totalSec % 60L
+        return if (hours > 0L) {
+            String.format(Locale.US, "%d:%02d:%02d", hours, mins, secs)
+        } else {
+            String.format(Locale.US, "%02d:%02d", mins, secs)
+        }
+    }
+
+    private fun postRefreshLyricLabel(packageName: String, label: String) {
+        mainHandler.post {
+            if (currentBannerPackageName == packageName) {
+                currentBannerLyricBtn?.text = label
+            }
+        }
+    }
+
+    private fun postTrackSwitchingPlaceholder(
+        ctx: Context,
+        key: String,
+        packageName: String,
+        appName: String,
+        newTitle: String,
+        trackToken: String
+    ) {
+        val placeholderBmp = NotificationIconStore.resolveAppIconBitmap(ctx, packageName)
+        mainHandler.post {
+            if (currentOverlayView == null || currentBannerKey != key) return@post
+            currentBannerTrackToken = trackToken
+            currentBannerIconView?.tag = trackToken
+            if (placeholderBmp != null && !placeholderBmp.isRecycled) {
+                currentBannerIconView?.setImageBitmap(placeholderBmp)
+            }
+            val displayTitle = newTitle.ifBlank { "加载中..." }
+            currentBannerTitleView?.text = if (displayTitle == appName) appName else "$appName · $displayTitle"
+            currentBannerDetailView?.text = "加载中..."
+            currentBannerProgressBar?.progress = 0
+            currentBannerTimeText?.text = "00:00 / ${NativeMediaSeekBarObserver.formatElapsedTime(currentBannerMediaDurMs)}"
+        }
+    }
+
+    private fun postApplyTaggedCoverBitmap(key: String, trackToken: String, bmp: Bitmap) {
+        mainHandler.post {
+            if (currentOverlayView == null || currentBannerKey != key) return@post
+            if (currentBannerTrackToken.isNotBlank() && currentBannerTrackToken != trackToken) return@post
+            val iv = currentBannerIconView ?: return@post
+            if (iv.tag == null || iv.tag == trackToken) {
+                iv.tag = trackToken
+                iv.setImageBitmap(bmp)
+            }
+        }
+    }
+
+    private fun postUpdateLiveLyric(key: String, lyricLine: String) {
+        val formatted = LrcCapsuleLyricEngine.formatLyricForDisplay(lyricLine, maxCharsPerLine = 30, maxLines = 3)
+        if (formatted.isBlank()) return
+        mainHandler.post {
+            val rootGroup = currentOverlayView as? ViewGroup ?: return@post
+            if (currentBannerKey != key) return@post
+            val tv = currentBannerDetailView ?: return@post
+            if (tv.text?.toString() == formatted) return@post
+            val animMs = SystemPropertyProfile.scaledAnimDurationMs(this, 220L)
+            if (animMs > 0L) {
+                runCatching {
+                    TransitionManager.beginDelayedTransition(
+                        rootGroup,
+                        ChangeBounds().setDuration(animMs).setInterpolator(RenderPowerGovernor.powerSavingLyricInterpolator)
+                    )
+                }
+            }
+            tv.maxLines = 3
+            tv.text = formatted
+            tv.animate().cancel()
+            tv.alpha = 0.62f
+            tv.animate()
+                .alpha(1f)
+                .setDuration(180L)
+                .setInterpolator(DecelerateInterpolator())
+                .start()
+        }
+    }
+
+    private fun postUpdateBannerMediaProgress(
+        key: String,
+        positionMs: Long,
+        durationMs: Long,
+        playing: Boolean,
+        speed: Float
+    ) {
+        mainHandler.post {
+            if (currentOverlayView == null || currentBannerKey != key) return@post
+            currentBannerPlayPauseBtn?.text = if (playing) "暂停" else "播放"
+            if (durationMs <= 0L) return@post
+            currentBannerMediaDurMs = durationMs
+            currentBannerMediaPosMs = positionMs.coerceIn(0L, durationMs)
+            currentBannerMediaAnchorElapsedMs = SystemClock.elapsedRealtime()
+            currentBannerMediaPlaying = playing
+            currentBannerMediaSpeed = if (playing && speed > 0f) speed else 0f
+            bannerSeekBarResetAnimator = NativeMediaSeekBarObserver.startSmoothLinearProgress(
+                currentBannerProgressBar,
+                currentBannerMediaPosMs,
+                durationMs,
+                playing,
+                if (speed > 0f) speed else 1f,
+                bannerSeekBarResetAnimator
+            )
+            currentBannerTimeText?.text = "${formatMediaMs(currentBannerMediaPosMs)} / ${formatMediaMs(durationMs)}"
+            mainHandler.removeCallbacks(bannerMediaTicker)
+            if (playing) {
+                mainHandler.postDelayed(bannerMediaTicker, 1000L)
+            }
+        }
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
@@ -140,6 +341,12 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {
         // No-op
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        // 横竖屏切换时及时收起旧方向横幅，避免错位残留
+        postDismissBanner()
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
@@ -170,7 +377,13 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
         actions: List<BannerAction>,
         config: CapsuleConfig,
         notificationKey: String?,
-        isPersistent: Boolean
+        isPersistent: Boolean,
+        isMedia: Boolean,
+        mediaDurationMs: Long,
+        mediaPositionMs: Long,
+        mediaPlaying: Boolean,
+        mediaContentType: MediaContentType,
+        mediaSupportsSeek: Boolean
     ) {
         mainHandler.post {
             mainHandler.removeCallbacks(autoDismissRunnable)
@@ -182,19 +395,35 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
                 return@post
             }
 
-            val isLandscape = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
             val bounds = wm.currentWindowMetrics.bounds
             val screenWidth = bounds.width()
+            val screenHeight = bounds.height()
+            val isLandscape = screenWidth > screenHeight ||
+                resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+
             val bannerWidth = if (isLandscape) {
-                (screenWidth * 0.62f).toInt()
+                val pct = config.landscapeBannerWidthPercent.coerceIn(32, 75) / 100f
+                (screenWidth * pct).toInt().coerceIn(dp(240f), (screenWidth - dp(32f)).coerceAtLeast(dp(240f)))
             } else {
                 (screenWidth - dp(20f)).coerceAtLeast(dp(260f))
             }
-            val baseTopY = if (isLandscape) dp(8f) else getSafeTopOffsetPx(wm)
-            val topY = (baseTopY + config.overlayBannerOffsetYPx).coerceAtLeast(0)
+            val offsetX = if (isLandscape) {
+                config.landscapeBannerOffsetXPx.coerceIn(-400, 400)
+            } else {
+                config.overlayBannerOffsetXPx.coerceIn(-240, 240)
+            }
+            val topY = if (isLandscape) {
+                // 横屏顶部加上安全下移基线，避免圆角横幅顶边被屏幕上边缘裁切
+                (dp(8f) + config.landscapeBannerOffsetYPx.coerceIn(0, 240)).coerceAtLeast(dp(6f))
+            } else {
+                val safeTop = getSafeTopOffsetPx(wm)
+                maxOf(safeTop, safeTop + config.overlayBannerOffsetYPx.coerceIn(0, 320))
+            }
             currentDurationMs = if (isPersistent) 60_000L else config.overlayBannerDurationSec.coerceIn(2, 15) * 1000L
 
             val resolvedIcon = iconBitmap ?: NotificationIconStore.resolveAppIconBitmap(this, packageName)
+            currentBannerLyricBtn = null
+            currentBannerPlayPauseBtn = null
 
             val view = buildBannerView(
                 appName = appName,
@@ -204,7 +433,14 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
                 contentIntent = contentIntent,
                 iconBitmap = resolvedIcon,
                 actions = actions,
-                config = config
+                config = config,
+                isLandscape = isLandscape,
+                isMedia = isMedia,
+                mediaDurationMs = mediaDurationMs,
+                mediaPositionMs = mediaPositionMs,
+                mediaPlaying = mediaPlaying,
+                mediaContentType = mediaContentType,
+                mediaSupportsSeek = mediaSupportsSeek
             )
             val lp = WindowManager.LayoutParams(
                 bannerWidth,
@@ -216,9 +452,12 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                x = offsetX
                 y = topY
                 layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                val initLod = if (isMedia) RenderPowerGovernor.RenderLod.BALANCED else RenderPowerGovernor.RenderLod.IDLE_LOW_POWER
+                RenderPowerGovernor.applyOverlayParamsLod(this, this@CapsuleOverlayAccessibilityService, initLod)
             }
 
             runCatching {
@@ -228,18 +467,23 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
                 wm.addView(view, lp)
                 currentOverlayView = view
                 currentBannerKey = notificationKey
-                view.animate()
+                currentBannerPackageName = packageName
+                view.animate().withLayer()
                     .translationY(0f)
                     .setDuration(200L)
                     .setInterpolator(DecelerateInterpolator())
                     .start()
 
                 mainHandler.postDelayed(autoDismissRunnable, currentDurationMs)
+                if (isMedia && mediaDurationMs > 0L && mediaPlaying) {
+                    mainHandler.removeCallbacks(bannerMediaTicker)
+                    mainHandler.postDelayed(bannerMediaTicker, 1000L)
+                }
 
                 val now = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
                 val actInfo = if (actions.isNotEmpty()) " · 含 ${actions.size} 个交互按钮" else ""
                 _lastOverlayStatus.value = "$now 已弹出：$appName · $title$actInfo"
-                AppLogger.i("Banner", "弹出横幅 app=$appName y=${topY}px padV=${config.overlayBannerPaddingVPx}px actions=${actions.size}")
+                AppLogger.i("Banner", "弹出横幅 app=$appName land=$isLandscape w=${bannerWidth}px x=${offsetX}px y=${topY}px actions=${actions.size}")
             }.onFailure { e ->
                 _lastOverlayStatus.value = "addView 异常：${e.javaClass.simpleName}: ${e.message}"
                 AppLogger.e("Banner", "addView 失败", e)
@@ -264,6 +508,17 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
     }
 
     private fun removeViewImmediate() {
+        mainHandler.removeCallbacks(bannerMediaTicker)
+        currentBannerProgressBar = null
+        currentBannerTimeText = null
+        currentBannerDetailView = null
+        currentBannerLyricBtn = null
+        currentBannerPlayPauseBtn = null
+        currentBannerTitleView = null
+        currentBannerIconView = null
+        currentBannerTrackToken = ""
+        currentBannerMediaDurMs = 0L
+        currentBannerMediaPlaying = false
         val view = currentOverlayView ?: return
         currentOverlayView = null
         currentBannerKey = null
@@ -326,18 +581,23 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
             return super.onInterceptTouchEvent(ev)
         }
 
+        override fun performClick(): Boolean {
+            return super.performClick()
+        }
+
         override fun onTouchEvent(ev: MotionEvent): Boolean {
             when (ev.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     downRawX = ev.rawX
                     downRawY = ev.rawY
                     isSwiping = false
+                    alpha = 0.92f
                     return true
                 }
                 MotionEvent.ACTION_MOVE -> {
                     val dx = ev.rawX - downRawX
                     val dy = ev.rawY - downRawY
-                    if (!isSwiping && abs(dx) > touchSlop && abs(dx) > abs(dy)) {
+                    if (!isSwiping && abs(dx) > swipeThresholdPx && abs(dx) > abs(dy) * 1.5f) {
                         isSwiping = true
                         mainHandler.removeCallbacks(autoDismissRunnable)
                     }
@@ -348,7 +608,8 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
                         return true
                     }
                 }
-                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                MotionEvent.ACTION_UP -> {
+                    alpha = 1f
                     if (isSwiping) {
                         val dx = ev.rawX - downRawX
                         val w = width.coerceAtLeast(1).toFloat()
@@ -373,7 +634,26 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
                         }
                         isSwiping = false
                         return true
+                    } else {
+                        // 未触发滑动时明确调用 performClick()，确保关闭自带按钮后点击横幅本体 100% 触发跳转
+                        performClick()
+                        return true
                     }
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    alpha = 1f
+                    if (isSwiping) {
+                        animate()
+                            .translationX(0f)
+                            .alpha(1f)
+                            .setDuration(180L)
+                            .setInterpolator(DecelerateInterpolator())
+                            .start()
+                        mainHandler.removeCallbacks(autoDismissRunnable)
+                        mainHandler.postDelayed(autoDismissRunnable, currentDurationMs)
+                        isSwiping = false
+                    }
+                    return true
                 }
             }
             return super.onTouchEvent(ev)
@@ -388,7 +668,14 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
         contentIntent: PendingIntent?,
         iconBitmap: Bitmap?,
         actions: List<BannerAction>,
-        config: CapsuleConfig
+        config: CapsuleConfig,
+        isLandscape: Boolean = false,
+        isMedia: Boolean = false,
+        mediaDurationMs: Long = 0L,
+        mediaPositionMs: Long = 0L,
+        mediaPlaying: Boolean = false,
+        mediaContentType: MediaContentType = MediaContentType.MUSIC,
+        mediaSupportsSeek: Boolean = false
     ): View {
         val bgInt = config.resolveOverlayBannerBgColor()
         val titleColor = CapsuleConfig.parseColorSafe(config.overlayBannerTitleColorHex, Color.parseColor("#FFFFFFFF"))
@@ -397,13 +684,19 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
         val accentColor = CapsuleConfig.parseColorSafe(config.accentColorHex, Color.parseColor("#FF34D399"))
         val borderColor = Color.argb(0x40, Color.red(accentColor), Color.green(accentColor), Color.blue(accentColor))
 
-        val padV = config.overlayBannerPaddingVPx.coerceIn(8, 120)
+        val padV = if (isLandscape) {
+            config.landscapeBannerPaddingVPx.coerceIn(6, 60)
+        } else {
+            config.overlayBannerPaddingVPx.coerceIn(8, 120)
+        }
+        val padH = if (isLandscape) dp(12f) else dp(16f)
+        val cornerRadiusPx = if (isLandscape) dp(18f).toFloat() else dp(24f).toFloat()
         val root = SwipeDismissBannerLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16f), padV, dp(16f), padV)
+            setPadding(padH, padV, padH, padV)
             background = GradientDrawable().apply {
                 shape = GradientDrawable.RECTANGLE
-                cornerRadius = dp(24f).toFloat()
+                cornerRadius = cornerRadiusPx
                 setColor(bgInt)
                 setStroke(dp(1f), borderColor)
             }
@@ -438,9 +731,9 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
             )
         }
 
-        if (iconBitmap != null) {
-            val iconSize = dp(40f)
-            val cornerR = dp(11f).toFloat()
+        if (iconBitmap != null && !iconBitmap.isRecycled) {
+            val iconSize = if (isLandscape) dp(30f) else dp(40f)
+            val cornerR = if (isLandscape) dp(8f).toFloat() else dp(11f).toFloat()
             val iv = ImageView(this).apply {
                 layoutParams = LinearLayout.LayoutParams(iconSize, iconSize).apply {
                     marginEnd = dp(12f)
@@ -473,18 +766,24 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
             ellipsize = TextUtils.TruncateAt.END
         }
         val tvDetail = TextView(this).apply {
-            this.text = text
+            this.text = if (isMedia) LrcCapsuleLyricEngine.formatLyricForDisplay(text, maxCharsPerLine = 30, maxLines = if (isLandscape) 2 else 3) else text
             setTextColor(detailColor)
-            setTextSize(TypedValue.COMPLEX_UNIT_SP, config.detailSizeSp)
-            maxLines = 2
+            if (isMedia) {
+                setTextSize(TypedValue.COMPLEX_UNIT_PX, config.bannerLyricTextSizePx.coerceIn(20f, 72f))
+            } else {
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, if (isLandscape) (config.detailSizeSp - 0.5f).coerceAtLeast(9f) else config.detailSizeSp)
+            }
+            maxLines = if (isLandscape) 2 else 3
             ellipsize = TextUtils.TruncateAt.END
-            setPadding(0, dp(3f), 0, 0)
+            setPadding(0, dp(if (isLandscape) 1f else 3f), 0, 0)
         }
+        currentBannerTitleView = tvTitle
+        currentBannerDetailView = tvDetail
         textCol.addView(tvTitle)
         textCol.addView(tvDetail)
         row.addView(textCol)
 
-        val btnHeightDp = config.bannerBtnSizeDp.coerceIn(26, 56)
+        val btnHeightDp = if (isLandscape) (config.bannerBtnSizeDp - 4).coerceIn(24, 44) else config.bannerBtnSizeDp.coerceIn(26, 56)
 
         // 仅当开启「渲染应用自带按钮」且原通知没有自带交互按钮时，才显示本应用的「打开 / 关闭」按钮
         // 关闭时点击横幅本体或原通知透传出的真实按钮即可直接跳转
@@ -506,8 +805,79 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
 
         root.addView(row)
 
-        // 读取并展示通知自带的交互按钮（如标记已读、复制验证码、接听、拒接、回复等）
-        if (actions.isNotEmpty()) {
+        // 媒体播放通知：套用与胶囊一致的同步进度条与读秒（同帧更新，绝不漂移）
+        if (isMedia && mediaDurationMs > 0L) {
+            val dur = mediaDurationMs.coerceAtLeast(1L)
+            val pos = mediaPositionMs.coerceIn(0L, dur)
+            currentBannerMediaDurMs = dur
+            currentBannerMediaPosMs = pos
+            currentBannerMediaAnchorElapsedMs = SystemClock.elapsedRealtime()
+            currentBannerMediaPlaying = mediaPlaying
+            currentBannerMediaSpeed = 1f
+
+            val progressRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                layoutParams = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply {
+                    topMargin = dp(if (isLandscape) 6f else 8f)
+                }
+            }
+            val pb = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
+                layoutParams = LinearLayout.LayoutParams(0, dp(5f), 1f).apply {
+                    marginEnd = dp(8f)
+                }
+                max = 1000
+                progress = ((pos * 1000L) / dur).toInt().coerceIn(0, 1000)
+                ContextCompat.getDrawable(this@CapsuleOverlayAccessibilityService, R.drawable.bg_media_progress)?.let {
+                    progressDrawable = it
+                }
+                progressTintList = ColorStateList.valueOf(accentColor)
+            }
+            val tvTime = TextView(this).apply {
+                this.text = "${formatMediaMs(pos)} / ${formatMediaMs(dur)}"
+                setTextColor(detailColor)
+                setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+                fontFeatureSettings = "tnum"
+                maxLines = 1
+            }
+            currentBannerProgressBar = pb
+            currentBannerTimeText = tvTime
+            progressRow.addView(pb)
+            progressRow.addView(tvTime)
+            root.addView(progressRow)
+        }
+
+        // 读取并展示交互按钮（媒体按类型分配快退/快进/暂停/上下曲；普通通知透传自带按钮）
+        val displayActions: List<BannerAction> = if (isMedia) {
+            val playLabel = if (mediaPlaying) "暂停" else "播放"
+            val list = mutableListOf<BannerAction>()
+            when (mediaContentType) {
+                MediaContentType.VIDEO, MediaContentType.RECORDER -> {
+                    if (mediaSupportsSeek) list.add(BannerAction("快退", null))
+                    list.add(BannerAction(playLabel, null))
+                    if (mediaSupportsSeek) list.add(BannerAction("快进", null))
+                }
+                MediaContentType.MUSIC -> {
+                    list.add(BannerAction("上一曲", null))
+                    if (mediaSupportsSeek) list.add(BannerAction("快退", null))
+                    list.add(BannerAction(playLabel, null))
+                    if (mediaSupportsSeek) list.add(BannerAction("快进", null))
+                    list.add(BannerAction("下一曲", null))
+                    if (CapsuleNotificationListener.shouldShowLyricButton(packageName, actions)) {
+                        val lyricLabel = CapsuleNotificationListener.getLyricButtonLabel(packageName)
+                        val rawAct = actions.firstOrNull { it.title.contains("词") || it.title.contains("解锁") }
+                        list.add(BannerAction(lyricLabel, rawAct?.intent))
+                    }
+                }
+            }
+            list
+        } else {
+            actions
+        }
+        if (displayActions.isNotEmpty()) {
             val actionRow = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
                 gravity = Gravity.CENTER_VERTICAL
@@ -515,10 +885,11 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
                     LinearLayout.LayoutParams.MATCH_PARENT,
                     LinearLayout.LayoutParams.WRAP_CONTENT
                 ).apply {
-                    topMargin = dp(10f)
+                    topMargin = dp(if (isLandscape) 6f else 10f)
                 }
             }
-            actions.take(3).forEachIndexed { idx, act ->
+            val effectiveBtnTextSp = if (displayActions.size >= 5) (config.btnSizeSp - 1f).coerceAtLeast(10f) else config.btnSizeSp
+            displayActions.take(6).forEachIndexed { idx, act ->
                 val pillBg = when {
                     act.isPositive -> Color.parseColor("#FF16A34A")
                     act.isDestructive -> Color.parseColor("#FFDC2626")
@@ -532,18 +903,34 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
                     label = act.title,
                     textColor = pillFg,
                     bgColor = pillBg,
-                    textSp = config.btnSizeSp,
+                    textSp = effectiveBtnTextSp,
                     heightDp = btnHeightDp
                 ) {
                     AppLogger.i("Banner", "点击透传按钮[${act.title}] pkg=$packageName remoteInput=${act.hasRemoteInput}")
                     triggerNotificationAction(act, contentIntent, packageName)
-                    postDismissBanner()
+                    if (isMedia && (act.title in setOf("快退", "快进", "暂停", "播放", "播放/暂停", "上一曲", "下一曲", "歌词", "锁词", "关词", "喜欢", "已赞", "取消喜欢") || act.title.contains("词"))) {
+                        if (act.title == "暂停" || act.title == "播放" || act.title == "播放/暂停") {
+                            currentBannerPlayPauseBtn?.let { ppBtn ->
+                                ppBtn.text = if (ppBtn.text?.toString() == "暂停") "播放" else "暂停"
+                            }
+                        }
+                        mainHandler.removeCallbacks(autoDismissRunnable)
+                        mainHandler.postDelayed(autoDismissRunnable, currentDurationMs)
+                    } else {
+                        postDismissBanner()
+                    }
                 }.apply {
                     layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
                         if (idx > 0) marginStart = dp(8f)
                     }
                     maxLines = 1
                     ellipsize = TextUtils.TruncateAt.END
+                }
+                if (act.title == "暂停" || act.title == "播放" || act.title == "播放/暂停") {
+                    currentBannerPlayPauseBtn = pill
+                }
+                if (act.title == "歌词" || act.title == "锁词" || act.title == "关词" || act.title == "解锁词" || act.title.contains("词")) {
+                    currentBannerLyricBtn = pill
                 }
                 actionRow.addView(pill)
             }
@@ -556,7 +943,7 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
     private fun sendPendingIntentCompat(pi: PendingIntent?): Boolean {
         if (pi == null) return false
         return runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE && pi.isActivity) {
                 val opts = ActivityOptions.makeBasic()
                     .setPendingIntentBackgroundActivityStartMode(
                         ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
@@ -569,13 +956,71 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
         }.getOrDefault(false)
     }
 
+    private fun dispatchFallbackMediaKey(keyCode: Int): Boolean {
+        return runCatching {
+            val am = getSystemService(AudioManager::class.java) ?: return false
+            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, keyCode))
+            am.dispatchMediaKeyEvent(KeyEvent(KeyEvent.ACTION_UP, keyCode))
+            true
+        }.getOrDefault(false)
+    }
+
     private fun triggerNotificationAction(
         action: BannerAction,
         fallbackContentIntent: PendingIntent?,
         packageName: String
     ) {
+        // 媒体播控按钮优先走活跃 MediaController.TransportControls（与胶囊播控一致），彻底解决横幅播控点击无效
+        val mediaCmd = when (action.title) {
+            "上一曲" -> CapsuleKeepAliveService.ACTION_MEDIA_PREV to KeyEvent.KEYCODE_MEDIA_PREVIOUS
+            "下一曲" -> CapsuleKeepAliveService.ACTION_MEDIA_NEXT to KeyEvent.KEYCODE_MEDIA_NEXT
+            "暂停", "播放", "播放/暂停" -> CapsuleKeepAliveService.ACTION_MEDIA_PLAY_PAUSE to KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
+            "快退" -> CapsuleKeepAliveService.ACTION_MEDIA_REWIND to KeyEvent.KEYCODE_MEDIA_REWIND
+            "快进" -> CapsuleKeepAliveService.ACTION_MEDIA_FAST_FORWARD to KeyEvent.KEYCODE_MEDIA_FAST_FORWARD
+            else -> null
+        }
+        if (mediaCmd != null) {
+            val handled = CapsuleNotificationListener.dispatchPinnedMediaCommand(this, mediaCmd.first)
+            if (handled) {
+                CapsuleNotificationListener.scheduleImmediateMediaResync()
+                return
+            }
+            if (sendPendingIntentCompat(action.intent)) {
+                CapsuleNotificationListener.scheduleImmediateMediaResync()
+                return
+            }
+            dispatchFallbackMediaKey(mediaCmd.second)
+            CapsuleNotificationListener.scheduleImmediateMediaResync()
+            return
+        }
+        if (action.title == "歌词" || action.title == "锁词" || action.title == "关词" || action.title == "解锁词" || action.title.contains("词")) {
+            CapsuleNotificationListener.triggerLyricCycleAction(this, currentBannerKey, packageName)
+            return
+        }
+        if (action.title == "喜欢" || action.title == "已赞" || action.title == "取消喜欢") {
+            if (CapsuleNotificationListener.triggerNativeFavoriteAction(this, currentBannerKey, packageName)) return
+        }
+
+        val isNonJumpToggle = action.title.contains("词") ||
+            action.title == "标为已读" ||
+            action.title == "喜欢" ||
+            action.title == "取消喜欢"
+
+        if (isNonJumpToggle) {
+            // 歌词/标为已读/喜欢等开关按钮：优先走实时 CustomAction / 最新通知 actionIntent，绝不误跳转打开 App
+            val ok = CapsuleNotificationListener.triggerFreshNotificationAction(
+                context = this,
+                notifKey = currentBannerKey,
+                packageName = packageName,
+                actionLabel = action.title
+            )
+            if (!ok && action.intent != null) {
+                sendPendingIntentCompat(action.intent)
+            }
+            return
+        }
+
         if (action.hasRemoteInput || action.intent == null) {
-            // 直接回复类按钮（需键盘输入）或空 Intent：跳转回原通知/应用
             openSourceApp(fallbackContentIntent, packageName)
             return
         }
@@ -625,6 +1070,7 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
 
     private fun openSourceApp(contentIntent: PendingIntent?, pkg: String) {
         val sent = sendPendingIntentCompat(contentIntent)
+        AppLogger.i("Banner", "执行跳转 pkg=$pkg hasPi=${contentIntent != null} piSent=$sent")
         if (!sent && pkg.isNotBlank()) {
             runCatching {
                 val launch = packageManager.getLaunchIntentForPackage(pkg)
@@ -642,7 +1088,7 @@ class CapsuleOverlayAccessibilityService : AccessibilityService() {
                 WindowInsets.Type.displayCutout() or WindowInsets.Type.statusBars()
             ).top
         }.getOrDefault(0)
-        return maxOf(insetsTop, dp(38f)) + dp(4f)
+        return maxOf(insetsTop, SystemPropertyProfile.notchHeightPxFromProp, dp(38f)) + dp(4f)
     }
 
     private fun dp(value: Float): Int =

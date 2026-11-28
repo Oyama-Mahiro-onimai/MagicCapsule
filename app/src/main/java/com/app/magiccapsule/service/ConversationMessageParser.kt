@@ -62,6 +62,7 @@ object ConversationMessageParser {
         body = stripDuplicateSender(cleanTitle, body)
 
         // 记录到内存会话队列（末尾去重，最多保留 10 条）
+        if (conversationHistory.size > 16) conversationHistory.clear()
         val queue = conversationHistory.computeIfAbsent(convKey) { mutableListOf() }
         synchronized(queue) {
             if (carMessages.isNotEmpty()) {
@@ -97,6 +98,12 @@ object ConversationMessageParser {
 
     fun clearConversation(convKey: String) {
         conversationHistory.remove(convKey)
+    }
+
+    fun trimMemory() {
+        if (conversationHistory.size > 8) {
+            conversationHistory.clear()
+        }
     }
 
     private fun stripLeadingCounter(text: String): String =

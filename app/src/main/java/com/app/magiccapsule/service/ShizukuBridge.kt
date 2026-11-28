@@ -30,6 +30,7 @@ object ShizukuBridge {
     private val autoRequestedThisSession = AtomicBoolean(false)
     private val autoGrantedOnce = AtomicBoolean(false)
     private val grantInProgress = AtomicBoolean(false)
+    private val refreshInProgress = AtomicBoolean(false)
 
     @Volatile
     private var onGrantedCallback: (() -> Unit)? = null
@@ -74,6 +75,18 @@ object ShizukuBridge {
     fun refreshState(
         autoRequest: Boolean = false,
         triggerAutoGrantIfNeeded: Boolean = false
+    ) {
+        if (!refreshInProgress.compareAndSet(false, true)) return
+        try {
+            refreshStateInternal(autoRequest, triggerAutoGrantIfNeeded)
+        } finally {
+            refreshInProgress.set(false)
+        }
+    }
+
+    private fun refreshStateInternal(
+        autoRequest: Boolean,
+        triggerAutoGrantIfNeeded: Boolean
     ) {
         val alive = runCatching { Shizuku.pingBinder() }.getOrDefault(false)
         _binderAlive.value = alive
@@ -179,5 +192,28 @@ object ShizukuBridge {
         } finally {
             grantInProgress.set(false)
         }
+    }
+
+    /**
+     * 通过已授权的 Shizuku 执行只读系统状态查询命令（例如 dumpsys / settings get）
+     */
+    fun runShellCommand(vararg cmd: String): Pair<Boolean, String> {
+        if (!_binderAlive.value || !_permissionGranted.value) {
+            return false to ""
+        }
+        return runCatching {
+            val method = Shizuku::class.java.getDeclaredMethod(
+                "newProcess",
+                Array<String>::class.java,
+                Array<String>::class.java,
+                String::class.java
+            ).apply { isAccessible = true }
+            val proc = method.invoke(null, cmd, null, null) as Process
+            val out = proc.inputStream.bufferedReader().readText().trim()
+            val err = proc.errorStream.bufferedReader().readText().trim()
+            val code = proc.waitFor()
+            val combined = if (err.isNotEmpty()) "$out | err=$err" else out
+            (code == 0) to combined
+        }.getOrDefault(false to "")
     }
 }
